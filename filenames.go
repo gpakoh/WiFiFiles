@@ -21,28 +21,6 @@ func availableBytes(path string) (uint64, error) {
 	return uint64(st.Bavail) * uint64(st.Bsize), nil
 }
 
-func totalUploadBytes(files []*multipart.FileHeader) uint64 {
-	var total uint64
-	for _, file := range files {
-		if file != nil && file.Size > 0 {
-			total += uint64(file.Size)
-		}
-	}
-	return total
-}
-
-func ensureUploadSpace(dir string, files []*multipart.FileHeader) error {
-	required := totalUploadBytes(files)
-	free, err := availableBytes(dir)
-	if err != nil {
-		return fmt.Errorf("failed to check disk space: %w", err)
-	}
-	if required+uploadSafetyReserve > free {
-		return fmt.Errorf("insufficient disk space: need %s, available %s", humanSize(int64(required)), humanSize(int64(free)))
-	}
-	return nil
-}
-
 func freeSpaceText(path string) string {
 	free, err := availableBytes(path)
 	if err != nil {

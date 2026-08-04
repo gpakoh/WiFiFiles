@@ -105,7 +105,7 @@ func TestMobilePageDoesNotRequireMainLoginAndIsPhoneNeutral(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	for _, want := range []string{"Передача с телефона по QR-коду", "current-progress", "overall-progress", "Свободное место", "Безопасный режим"} {
+	for _, want := range []string{"Передача с телефона по QR-коду", "current-progress", "overall-progress", "Свободное место", "Безопасный режим", "badge-safe"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("mobile page does not contain %q", want)
 		}
@@ -160,7 +160,7 @@ func TestEditModeCanDownloadRenameAndDeleteOnlySelectedFolder(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	app.routes().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/m/"+token, nil))
-	for _, want := range []string{"Режим редактирования", "/download?", "/rename", "/delete", "/download-all", "/delete-all", "Скачать всё", "Удалить всё"} {
+	for _, want := range []string{"Режим редактирования", "badge-edit", "/download?", "/rename", "/delete", "/download-all", "/delete-all", "Скачать всё", "Удалить всё"} {
 		if !strings.Contains(page.Body.String(), want) {
 			t.Fatalf("edit page missing %q", want)
 		}

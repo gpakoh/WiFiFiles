@@ -329,3 +329,136 @@ func TestHandleControlAndControlData(t *testing.T) {
 		t.Fatalf("handleControl /nope = %d", rec.Code)
 	}
 }
+
+func TestHandleSettingsMethodsAndActions(t *testing.T) {
+	app := newTestWebApp(t)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("PUT", "/settings", nil)
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT = %d, want 405", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/settings", nil)
+	req.ParseForm()
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("short creds = %d, want 400", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/settings", nil)
+	req.ParseForm()
+	req.Form.Set("username", "newuser")
+	req.Form.Set("password", "newpass123")
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("valid creds = %d, want 303", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/login" {
+		t.Fatalf("location = %q", loc)
+	}
+
+	app.cfgMu.Lock()
+	app.cfg.DefaultTarget = "internal/Books"
+	app.cfgMu.Unlock()
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/settings", nil)
+	req.ParseForm()
+	req.Form.Set("action", "clear_default_target")
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("clear default = %d, want 303", rr.Code)
+	}
+	app.cfgMu.RLock()
+	if app.cfg.DefaultTarget != "" {
+		t.Fatal("default target not cleared")
+	}
+	app.cfgMu.RUnlock()
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/settings?msg=hello", nil)
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET settings = %d", rr.Code)
+	}
+}
+
+func TestHandleMkdirAndDeleteNegatives(t *testing.T) {
+	app := newTestWebApp(t)
+	app.roots["internal"] = t.TempDir()
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/mkdir", nil)
+	app.handleMkdir(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("mkdir GET = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/mkdir?p=internal/system/x", nil)
+	req.ParseForm()
+	app.handleMkdir(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("mkdir protected = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/mkdir?p=internal", nil)
+	req.ParseForm()
+	req.Form.Set("name", "..")
+	app.handleMkdir(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("mkdir invalid name = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/mkdir?p=internal", nil)
+	req.ParseForm()
+	req.Form.Set("name", "exists")
+	app.handleMkdir(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("mkdir created = %d", rr.Code)
+	}
+	req = httptest.NewRequest("POST", "/mkdir?p=internal", nil)
+	req.ParseForm()
+	req.Form.Set("name", "exists")
+	app.handleMkdir(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("mkdir dup = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/delete?p=internal", nil)
+	req.ParseForm()
+	app.handleDelete(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("delete root = %d, want 400 (resolvePath rejects root)", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/delete?p=internal/system/x", nil)
+	req.ParseForm()
+	app.handleDelete(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("delete protected = %d, want 400", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/delete?p=internal/nope", nil)
+	req.ParseForm()
+	app.handleDelete(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("delete missing = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/delete?p=internal/exists", nil)
+	req.ParseForm()
+	app.handleDelete(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("delete ok = %d", rr.Code)
+	}
+}

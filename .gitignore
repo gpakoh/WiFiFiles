@@ -4,3 +4,6 @@ build/
 *.base
 WiFiFiles.server
 WiFiFiles.app
+CHANGELOG_RU.txt
+native_state.ini
+server

@@ -483,3 +483,22 @@ func TestStopLockedNilServers(t *testing.T) {
 		t.Fatalf("smb state not reset: %d %q", sm.smbPort, sm.smbKey)
 	}
 }
+
+func TestWriteNativeStateStoppedFallback(t *testing.T) {
+	dir := t.TempDir()
+	writeNativeStateStopped(dir, "shutting down")
+	data, err := os.ReadFile(filepath.Join(dir, "native_state.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "running=0") {
+		t.Fatalf("state missing running=0: %q", text)
+	}
+	if !strings.Contains(text, "version="+version) {
+		t.Fatalf("state missing version: %q", text)
+	}
+	if !strings.Contains(text, "message=") {
+		t.Fatalf("state missing message line: %q", text)
+	}
+}

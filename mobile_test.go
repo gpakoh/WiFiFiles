@@ -991,3 +991,69 @@ func TestRawMobileUploadNegativeBranches(t *testing.T) {
 		t.Fatalf("traversal name = %d", rr.Code)
 	}
 }
+
+func TestAddMobileTokenKeepsLiveAndCaps(t *testing.T) {
+	if err := os.MkdirAll(filepath.Dir(mobileTokenPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var backup []byte
+	if data, err := os.ReadFile(mobileTokenPath); err == nil {
+		backup = data
+	}
+	t.Cleanup(func() {
+		if backup == nil {
+			_ = os.Remove(mobileTokenPath)
+		} else {
+			_ = os.WriteFile(mobileTokenPath, backup, 0600)
+		}
+	})
+	_ = os.Remove(mobileTokenPath + ".tmp")
+
+	now := time.Now()
+	if err := addMobileToken(MobileTokenRecord{Token: "tok-a", Expires: now.Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := addMobileToken(MobileTokenRecord{Token: "tok-a", Expires: now.Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := readMobileTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, r := range records {
+		if r.Token == "tok-a" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("dedupe failed, tok-a count = %d", count)
+	}
+
+	for i := 0; i < maxMobileTokens+5; i++ {
+		tok := fmt.Sprintf("tok-%d", i)
+		if err := addMobileToken(MobileTokenRecord{Token: tok, Expires: now.Add(time.Hour).Unix()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err = readMobileTokens()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) > maxMobileTokens {
+		t.Fatalf("token file over cap: %d > %d", len(records), maxMobileTokens)
+	}
+
+	if err := addMobileToken(MobileTokenRecord{Token: "expired", Expires: now.Add(-time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := addMobileToken(MobileTokenRecord{Token: "trigger-cleanup", Expires: now.Add(time.Hour).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	records, _ = readMobileTokens()
+	for _, r := range records {
+		if r.Token == "expired" {
+			t.Fatal("expired token retained")
+		}
+	}
+}

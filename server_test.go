@@ -7,7 +7,9 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -505,5 +507,96 @@ func TestSettingsClearDefaultTarget(t *testing.T) {
 	}
 	if app2.cfg.DefaultTarget != "" {
 		t.Fatalf("default target not cleared: %q", app2.cfg.DefaultTarget)
+	}
+}
+
+func TestLoadOrCreateConfigVariants(t *testing.T) {
+	dir := t.TempDir()
+
+	cfgPath := filepath.Join(dir, "missing.json")
+	app, err := newApp(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(cfgPath)
+	if err := app.loadOrCreateConfig(); err != nil {
+		t.Fatalf("fresh config: %v", err)
+	}
+	app.cfgMu.RLock()
+	if app.cfg.InternalEnabled != true || app.cfg.Username == "" || app.cfg.HTTPPort != 8080 {
+		t.Fatalf("defaults wrong: %+v", app.cfg)
+	}
+	app.cfgMu.RUnlock()
+
+	v1 := Config{
+		ConfigVersion: 1,
+		Username:      "pocketbook",
+		PasswordHash:  "hash",
+		Port:          99,
+		InternalEnabled: true,
+		SDEnabled:     true,
+	}
+	data, _ := json.Marshal(v1)
+	cfgPath2 := filepath.Join(dir, "v1.json")
+	if err := os.WriteFile(cfgPath2, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	app2, err := newApp(cfgPath2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app2.loadOrCreateConfig(); err != nil {
+		t.Fatalf("v1 migration: %v", err)
+	}
+	app2.cfgMu.RLock()
+	if app2.cfg.ConfigVersion != 7 || app2.cfg.HTTPPort != 8080 || !app2.cfg.HTTPEnabled {
+		t.Fatalf("v1 migration wrong: %+v", app2.cfg)
+	}
+	app2.cfgMu.RUnlock()
+
+	garbage := filepath.Join(dir, "garbage.json")
+	if err := os.WriteFile(garbage, []byte("{{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app3, err := newApp(garbage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app3.loadOrCreateConfig(); err != nil {
+		t.Fatalf("garbage config: %v", err)
+	}
+}
+
+func TestReadLivePIDVariants(t *testing.T) {
+	dir := t.TempDir()
+
+	if pid, ok := readLivePID(dir); ok {
+		t.Fatalf("missing pid file: pid=%d", pid)
+	}
+
+	pidFile := filepath.Join(dir, "wififiles.pid")
+	if err := os.WriteFile(pidFile, []byte("0"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readLivePID(dir); ok {
+		t.Fatal("pid 0 accepted")
+	}
+	if _, err := os.Stat(pidFile); err == nil {
+		t.Fatal("stale pid file not removed")
+	}
+
+	if err := os.WriteFile(pidFile, []byte("not-a-pid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readLivePID(dir); ok {
+		t.Fatal("garbage pid accepted")
+	}
+
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pid, ok := readLivePID(dir)
+	if !ok || pid != os.Getpid() {
+		t.Fatalf("live pid = %d/%v", pid, ok)
 	}
 }

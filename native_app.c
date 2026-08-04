@@ -267,6 +267,34 @@ static int contains_ci(const char *text, const char *needle) {
     return 0;
 }
 
+static int atoi10(const char *s) {
+    int n = 0, i = 0;
+    if (!s) return 0;
+    while (s[i] >= '0' && s[i] <= '9') { n = n * 10 + (s[i] - '0'); i++; }
+    return n;
+}
+
+static void append_int(char *dst, int cap, int value) {
+    char t[16]; int n = 0; unsigned int v;
+    if (value < 0) { scat(dst, cap, "-"); v = (unsigned int)(-value); } else v = (unsigned int)value;
+    if (v == 0) { scat(dst, cap, "0"); return; }
+    while (v && n < 15) {
+        unsigned int q = 0, rem = v;
+        /* Division-free base-10 conversion. */
+        while (rem >= 1000000000U) { rem -= 1000000000U; q += 100000000U; }
+        while (rem >= 100000000U) { rem -= 100000000U; q += 10000000U; }
+        while (rem >= 10000000U) { rem -= 10000000U; q += 1000000U; }
+        while (rem >= 1000000U) { rem -= 1000000U; q += 100000U; }
+        while (rem >= 100000U) { rem -= 100000U; q += 10000U; }
+        while (rem >= 10000U) { rem -= 10000U; q += 1000U; }
+        while (rem >= 1000U) { rem -= 1000U; q += 100U; }
+        while (rem >= 100U) { rem -= 100U; q += 10U; }
+        while (rem >= 10U) { rem -= 10U; q += 1U; }
+        t[n++] = (char)('0' + rem);
+        v = q;
+    }
+    while (n--) { char c[2]; c[0] = t[n]; c[1] = 0; scat(dst, cap, c); }
+}
 
 static int sys_open(const char *path, int flags, int mode) {
     register int r0 asm("r0") = (int)path;

@@ -150,6 +150,7 @@ static char folder_dirs[MAX_FOLDER_DIRS][256];
 static char folder_names[MAX_FOLDER_DIRS][128];
 static char folder_error[192];
 static int folder_count = 0;
+static int folder_total = 0;
 static int folder_page = 0;
 static char qr_target[256];
 static char qr_url[160];
@@ -1014,6 +1015,8 @@ static int request_folder_list(const char *path) {
     if (count < 0) count = 0;
     if (count > MAX_FOLDER_DIRS) count = MAX_FOLDER_DIRS;
     folder_count = count;
+    folder_total = ini_int(helper_data, "total", 0);
+    if (folder_total < count) folder_total = count;
     for (i = 0; i < count; i++) {
         key[0] = 0; scat(key, sizeof(key), "dir"); append_int(key, sizeof(key), i);
         ini_value(helper_data, key, folder_dirs[i], sizeof(folder_dirs[i]));
@@ -1667,6 +1670,14 @@ static void draw_folder_picker(void) {
     if (folder_count > FOLDER_PAGE_SIZE) {
         append_int(page_label, sizeof(page_label), folder_page + 1); scat(page_label, sizeof(page_label), " / "); append_int(page_label, sizeof(page_label), (folder_count + FOLDER_PAGE_SIZE - 1) / FOLDER_PAGE_SIZE);
         draw_text(font_small, 18, by - 38, screen_w - 36, 30, page_label, ALIGN_CENTER | VALIGN_MIDDLE);
+    }
+    if (folder_total > folder_count) {
+        char shown_label[48];
+        scopy(shown_label, sizeof(shown_label), L("Показано ", "Showing ", "Affiché ", "Gezeigt "));
+        append_int(shown_label, sizeof(shown_label), folder_count);
+        scat(shown_label, sizeof(shown_label), L(" из ", " of ", " sur ", " von "));
+        append_int(shown_label, sizeof(shown_label), folder_total);
+        draw_text(font_small, 18, by - 38, screen_w - 36, 30, shown_label, ALIGN_LEFT | VALIGN_MIDDLE);
     }
     draw_action(FOLDER_BACK, x1, by, bw, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
     draw_action(FOLDER_UP, x2, by, bw, 54, L("ВВЕРХ", "UP", "DOSSIER PARENT", "HOCH"), folder_parent[0] == 0);

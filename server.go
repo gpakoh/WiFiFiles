@@ -1185,6 +1185,17 @@ func nativeFolderListFile(appDir string) {
 		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
 	})
 	lines := []string{"error=", "current=" + current, "parent=" + parentVirtual(current)}
+	total := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || strings.HasPrefix(entry.Name(), ".") || isHiddenSystemPath(current, entry.Name()) {
+			continue
+		}
+		child := current + "/" + entry.Name()
+		if isProtectedVirtual(child) {
+			continue
+		}
+		total++
+	}
 	count := 0
 	for _, entry := range entries {
 		if count >= 160 || !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || strings.HasPrefix(entry.Name(), ".") || isHiddenSystemPath(current, entry.Name()) {
@@ -1197,7 +1208,7 @@ func nativeFolderListFile(appDir string) {
 		lines = append(lines, fmt.Sprintf("dir%d=%s", count, child), fmt.Sprintf("name%d=%s", count, entry.Name()))
 		count++
 	}
-	lines = append(lines, fmt.Sprintf("count=%d", count))
+	lines = append(lines, fmt.Sprintf("count=%d", count), fmt.Sprintf("total=%d", total))
 	writeNativeINI(nativeFolderListPath, lines)
 }
 

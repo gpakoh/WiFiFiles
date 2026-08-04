@@ -669,3 +669,149 @@ func TestRollbackDAVDestination(t *testing.T) {
 		t.Fatalf("backup should be gone, err=%v", err)
 	}
 }
+
+func TestHandleGetVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	book := filepath.Join(internal, "book.fb2")
+	if err := os.WriteFile(book, []byte("story"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(internal, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "GET", "http://pb/dav/internal/book.fb2", "", nil)
+	if rr.Code != 200 || rr.Body.String() != "story" {
+		t.Fatalf("file get: %d %q", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("ETag") == "" {
+		t.Fatal("missing ETag")
+	}
+
+	rr = davRequest(t, dav, "GET", "http://pb/dav/internal/book.fb2?download=1", "", nil)
+	if rr.Header().Get("Content-Disposition") == "" {
+		t.Fatal("missing Content-Disposition")
+	}
+
+	rr = davRequest(t, dav, "GET", "http://pb/dav/internal/", "", nil)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "sub") || !strings.Contains(rr.Body.String(), "book.fb2") {
+		t.Fatalf("dir listing: %d %q", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "HEAD", "http://pb/dav/internal/", "", nil)
+	if rr.Code != 200 {
+		t.Fatalf("HEAD dir: %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "GET", "http://pb/dav/internal/", "", map[string]string{"User-Agent": "Mozilla/5.0"})
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "<html") {
+		t.Fatalf("browser dir: %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "GET", "http://pb/dav/internal/missing.fb2", "", nil)
+	if rr.Code != 404 {
+		t.Fatalf("missing file: %d", rr.Code)
+	}
+}
+
+func TestCopyDAVPathBranches(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a.fb2"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "sub", "b.fb2"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "skip.me"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "skip.me"), filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyDAVPath(src, dst, 0, 0); err != nil {
+		t.Fatalf("depth0 dir: %v", err)
+	}
+	if st, err := os.Stat(dst); err != nil || !st.IsDir() {
+		t.Fatalf("depth0 dir not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "a.fb2")); err == nil {
+		t.Fatal("depth0 copied file (should be empty)")
+	}
+
+	dst2 := filepath.Join(dir, "dst2")
+	if err := copyDAVPath(src, dst2, 1, 0); err != nil {
+		t.Fatalf("depth1 dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst2, "sub", "b.fb2")); err != nil {
+		t.Fatalf("depth1 nested file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst2, "link")); err == nil {
+		t.Fatal("symlink copied")
+	}
+
+	if err := copyDAVPath(filepath.Join(dir, "nope"), filepath.Join(dir, "x"), 1, 0); err == nil {
+		t.Fatal("missing src accepted")
+	}
+	if err := copyDAVPath(src, filepath.Join(dir, "dst3"), 1, 129); err == nil || err.Error() != "directory nesting is too deep" {
+		t.Fatalf("recursion limit: %v", err)
+	}
+	linkSrc := filepath.Join(dir, "real-link")
+	if err := os.Symlink(filepath.Join(dir, "skip.me"), linkSrc); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyDAVPath(linkSrc, filepath.Join(dir, "x"), 1, 0); err == nil || err.Error() != "symbolic links are not available through WebDAV" {
+		t.Fatalf("symlink src: %v", err)
+	}
+}
+
+func TestHandleLockVariants(t *testing.T) {
+	dav, _ := newTestDAV(t)
+
+	rr := davRequest(t, dav, "LOCK", "http://pb/dav/", "", map[string]string{"Timeout": "Second-30"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("lock root = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "LOCK", "http://pb/dav/internal/newlock.fb2", `<d:owner>x</d:owner>`, map[string]string{"Timeout": "Second-30"})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("lock missing = %d", rr.Code)
+	}
+	lockToken := rr.Header().Get("Lock-Token")
+	if lockToken == "" {
+		t.Fatal("missing Lock-Token")
+	}
+
+	rr = davRequest(t, dav, "LOCK", "http://pb/dav/internal/newlock.fb2", `<d:owner>x</d:owner>`, map[string]string{"Timeout": "Second-30"})
+	if rr.Code != 423 {
+		t.Fatalf("lock existing = %d, want 423", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "LOCK", "http://pb/dav/internal/newlock.fb2", "", map[string]string{"If": lockToken, "Timeout": "Second-60"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("refresh = %d", rr.Code)
+	}
+	if rr.Header().Get("Timeout") != "Second-60" {
+		t.Fatalf("refresh timeout = %q", rr.Header().Get("Timeout"))
+	}
+
+	rr = davRequest(t, dav, "LOCK", "http://pb/dav/internal/newlock.fb2", "", map[string]string{"If": "<opaquelocktoken:unknown>", "Timeout": "Second-30"})
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("refresh unknown = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "UNLOCK", "http://pb/dav/internal/newlock.fb2", "", map[string]string{"Lock-Token": ""})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unlock no token = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "UNLOCK", "http://pb/dav/internal/newlock.fb2", "", map[string]string{"Lock-Token": lockToken})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("unlock = %d, want 204", rr.Code)
+	}
+}

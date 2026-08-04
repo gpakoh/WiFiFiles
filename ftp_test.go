@@ -520,3 +520,28 @@ func TestFTPResumeRetrieve(t *testing.T) {
 	}
 	_ = c.reply()
 }
+
+func TestPathStatus(t *testing.T) {
+	root := t.TempDir()
+	if got := pathStatus(root); got != "read-write" {
+		t.Fatalf("pathStatus(dir) = %q, want read-write", got)
+	}
+	ro := filepath.Join(root, "ro")
+	if err := os.MkdirAll(ro, 0555); err != nil {
+		t.Fatal(err)
+	}
+	got := pathStatus(ro)
+	if got != "read-write" && !strings.HasPrefix(got, "read-only") {
+		t.Fatalf("pathStatus(ro-dir) = %q", got)
+	}
+	if got := pathStatus(filepath.Join(root, "missing")); !strings.HasPrefix(got, "unavailable") {
+		t.Fatalf("pathStatus(missing) = %q", got)
+	}
+	file := filepath.Join(root, "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := pathStatus(file); got != "not a directory" {
+		t.Fatalf("pathStatus(file) = %q, want not a directory", got)
+	}
+}

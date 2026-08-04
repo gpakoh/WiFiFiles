@@ -728,3 +728,23 @@ func TestRefreshDynamicStateAppendsMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestFlushMobilePending(t *testing.T) {
+	a := newTestAuthApp(t)
+	a.mobilePending = make(map[string]map[string]struct{})
+	a.mobileTimers = make(map[string]*time.Timer)
+	if got := a.flushMobilePending("nope"); got != 0 {
+		t.Fatalf("flush empty = %d, want 0", got)
+	}
+	a.mobileMu.Lock()
+	a.mobilePending["tok"] = map[string]struct{}{"/mnt/ext1/Books/a.epub": {}, "/mnt/ext1/Books/b.fb2": {}}
+	a.mobileMu.Unlock()
+	if got := a.flushMobilePending("tok"); got != 2 {
+		t.Fatalf("flush = %d, want 2", got)
+	}
+	a.mobileMu.Lock()
+	defer a.mobileMu.Unlock()
+	if len(a.mobilePending) != 0 {
+		t.Fatalf("pending not cleared: %v", a.mobilePending)
+	}
+}

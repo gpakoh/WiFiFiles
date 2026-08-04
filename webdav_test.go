@@ -568,3 +568,104 @@ func TestWebDAVMoveSameFileHardlink(t *testing.T) {
 		t.Fatalf("source should be gone, stat err=%v", err)
 	}
 }
+
+func TestDAVRootInfoImplementsFileInfo(t *testing.T) {
+	var info os.FileInfo = davRootInfo{}
+	if info.Name() != "WiFiFiles" {
+		t.Fatalf("Name = %q", info.Name())
+	}
+	if info.Size() != 0 {
+		t.Fatalf("Size = %d", info.Size())
+	}
+	if info.Mode() != os.ModeDir|0755 {
+		t.Fatalf("Mode = %v", info.Mode())
+	}
+	if !info.IsDir() {
+		t.Fatal("IsDir = false")
+	}
+	if !info.ModTime().Equal(time.Unix(0, 0).UTC()) {
+		t.Fatalf("ModTime = %v", info.ModTime())
+	}
+	if info.Sys() != nil {
+		t.Fatalf("Sys = %v", info.Sys())
+	}
+}
+
+func TestIsDAVRootRequest(t *testing.T) {
+	for _, path := range []string{"/dav", "/dav/"} {
+		req := httptest.NewRequest("GET", path, nil)
+		if !isDAVRootRequest(req) {
+			t.Errorf("isDAVRootRequest(%q) = false", path)
+		}
+	}
+	for _, path := range []string{"/dav/internal", "/dav/", "/", "/other"} {
+		req := httptest.NewRequest("GET", path, nil)
+		if path == "/dav/" {
+			continue
+		}
+		if isDAVRootRequest(req) {
+			t.Errorf("isDAVRootRequest(%q) = true", path)
+		}
+	}
+}
+
+func TestWindowsDAVVolume(t *testing.T) {
+	cases := []struct {
+		in   string
+		vol  string
+		want bool
+	}{
+		{"/dav/internal", "/internal", true},
+		{"/dav/sd", "/sd", true},
+		{"/dav/internal/", "/internal", true},
+		{"/dav/internal/Books", "", false},
+		{"/dav/sd/Books/novel.epub", "", false},
+		{"/dav/", "", false},
+		{"dav/sd", "/sd", true},
+	}
+	for _, c := range cases {
+		vol, ok := windowsDAVVolume(c.in)
+		if vol != c.vol || ok != c.want {
+			t.Errorf("windowsDAVVolume(%q) = (%q, %v), want (%q, %v)", c.in, vol, ok, c.vol, c.want)
+		}
+	}
+}
+
+func TestRollbackDAVDestination(t *testing.T) {
+	root := t.TempDir()
+	dst := filepath.Join(root, "target")
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "a.txt"), []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rollbackDAVDestination(dst, davDestinationStage{})
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("stage without backup: target should be removed, err=%v", err)
+	}
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "a.txt"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(root, "backup")
+	if err := os.Rename(dst, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "a.txt"), []byte("new"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rollbackDAVDestination(dst, davDestinationStage{Existed: true, Backup: backup})
+	if data, err := os.ReadFile(filepath.Join(dst, "a.txt")); err != nil || string(data) != "old" {
+		t.Fatalf("rollback did not restore backup: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("backup should be gone, err=%v", err)
+	}
+}

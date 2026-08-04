@@ -939,3 +939,55 @@ func TestHandleMobileNegativePaths(t *testing.T) {
 		t.Fatal("fragment missing free-space header")
 	}
 }
+
+func TestReadMultipartText(t *testing.T) {
+	if got, err := readMultipartText(strings.NewReader("hello"), 10); err != nil || got != "hello" {
+		t.Fatalf("short = (%q, %v)", got, err)
+	}
+	if _, err := readMultipartText(strings.NewReader("hello world"), 5); err == nil {
+		t.Fatal("oversize accepted")
+	}
+}
+
+func TestRawMobileUploadNegativeBranches(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "safe")
+
+	rr, _ := mobileRawUploadRequest(t, app, token, "", "book.fb2", []byte("data"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("empty upload id = %d", rr.Code)
+	}
+
+	rr, _ = mobileRawUploadRequest(t, app, token, strings.Repeat("x", 241), "book.fb2", []byte("data"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("long upload id = %d", rr.Code)
+	}
+
+	rr, _ = mobileRawUploadRequest(t, app, token, "raw-neg-1", "notes.md", []byte("data"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("non-book name = %d", rr.Code)
+	}
+
+	rr, _ = mobileRawUploadRequest(t, app, token, "raw-neg-2", "book.fb2", nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("empty body = %d", rr.Code)
+	}
+
+	payload := []byte("same-content")
+	firstRR, first := mobileRawUploadRequest(t, app, token, "raw-neg-3", "same.fb2", payload)
+	secondRR, second := mobileRawUploadRequest(t, app, token, "raw-neg-4", "same.fb2", payload)
+	if firstRR.Code != http.StatusOK || secondRR.Code != http.StatusOK {
+		t.Fatalf("dup codes %d/%d", firstRR.Code, secondRR.Code)
+	}
+	if second.Status != "skipped" {
+		t.Fatalf("duplicate result = %+v", second)
+	}
+	_ = first
+
+	if err := os.WriteFile(filepath.Join(books, "noext"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr, _ = mobileRawUploadRequest(t, app, token, "raw-neg-5", "../..", []byte("data"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("traversal name = %d", rr.Code)
+	}
+}

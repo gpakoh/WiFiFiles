@@ -923,6 +923,16 @@ func writeNativeState(sm *ServiceManager, message string) {
 	fmt.Fprintf(&b, "uid=%d\n", os.Getuid())
 	fmt.Fprintf(&b, "smb_available=1\n")
 	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
+	freeInternal := "—"
+	freeSD := "—"
+	if free, err := availableBytes(sm.app.roots["internal"]); err == nil {
+		freeInternal = humanSize(int64(free))
+	}
+	if free, err := availableBytes(sm.app.roots["sd"]); err == nil {
+		freeSD = humanSize(int64(free))
+	}
+	fmt.Fprintf(&b, "free_internal=%s\n", cleanINIValue(freeInternal))
+	fmt.Fprintf(&b, "free_sd=%s\n", cleanINIValue(freeSD))
 	fmt.Fprintf(&b, "message=%s\n", cleanINIValue(message))
 	statePath := nativeStatePath(sm.appDir)
 	_ = os.Remove(statePath)
@@ -953,6 +963,16 @@ func writeNativeStateStopped(appDir, message string) {
 	fmt.Fprintf(&b, "internal_enabled=%d\nsd_enabled=%d\nlogging_enabled=%d\n", bool01(cfg.InternalEnabled), bool01(cfg.SDEnabled), bool01(cfg.LoggingEnabled))
 	fmt.Fprintf(&b, "username=%s\nlanguage=%s\npassword_is_default=%d\nuid=%d\nsmb_available=1\n", cleanINIValue(cfg.Username), cleanINIValue(cfg.Language), bool01(usesDefaultPassword(cfg)), os.Getuid())
 	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
+	freeInternal := "—"
+	freeSD := "—"
+	if free, err := availableBytes(app.roots["internal"]); err == nil {
+		freeInternal = humanSize(int64(free))
+	}
+	if free, err := availableBytes(app.roots["sd"]); err == nil {
+		freeSD = humanSize(int64(free))
+	}
+	fmt.Fprintf(&b, "free_internal=%s\n", cleanINIValue(freeInternal))
+	fmt.Fprintf(&b, "free_sd=%s\n", cleanINIValue(freeSD))
 	fmt.Fprintf(&b, "message=%s\n", cleanINIValue(message))
 	statePath := nativeStatePath(appDir)
 	_ = os.Remove(statePath)

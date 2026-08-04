@@ -209,6 +209,8 @@ struct app_state {
     int password_is_default;
     int uid;
     char default_target[256];
+    char free_internal[32];
+    char free_sd[32];
     char message[192];
 };
 
@@ -971,6 +973,8 @@ static void load_state(void) {
     st.password_is_default = ini_int(data, "password_is_default", 1);
     st.uid = ini_int(data, "uid", 101);
     ini_value(data, "default_target", st.default_target, sizeof(st.default_target));
+    ini_value(data, "free_internal", st.free_internal, sizeof(st.free_internal));
+    ini_value(data, "free_sd", st.free_sd, sizeof(st.free_sd));
     ini_value(data, "message", v, sizeof(v)); scopy(st.message, sizeof(st.message), v);
     current_lang = lang_from_code(st.language);
     localize_helper_message(st.message, sizeof(st.message));
@@ -1620,7 +1624,21 @@ static void draw_storage_picker(void) {
           "Wählen Sie zuerst den Speicher. Im nächsten Bildschirm können Sie jeden Ordner öffnen und als Ziel auswählen."),
         ALIGN_CENTER | VALIGN_MIDDLE);
     draw_row(0, y, L("Память ридера", "Reader storage", "Mémoire du lecteur", "Reader-Speicher"), st.internal_enabled ? ">" : L("ВЫКЛ", "OFF", "DÉSACTIVÉ", "AUS"), !st.internal_enabled);
+    if (st.internal_enabled && st.free_internal[0]) {
+        char free_label[96];
+        free_label[0] = 0;
+        scat(free_label, sizeof(free_label), L("Свободно: ", "Free: ", "Libre : ", "Frei: "));
+        scat(free_label, sizeof(free_label), st.free_internal);
+        draw_text(font_help, 34, y + 44, screen_w - 68, 22, free_label, ALIGN_LEFT | VALIGN_MIDDLE);
+    }
     draw_row(1, y + 70, L("Карта памяти SD", "SD card", "Carte SD", "SD-Karte"), st.sd_enabled ? ">" : L("ВЫКЛ", "OFF", "DÉSACTIVÉ", "AUS"), !st.sd_enabled);
+    if (st.sd_enabled && st.free_sd[0]) {
+        char free_label[96];
+        free_label[0] = 0;
+        scat(free_label, sizeof(free_label), L("Свободно: ", "Free: ", "Libre : ", "Frei: "));
+        scat(free_label, sizeof(free_label), st.free_sd);
+        draw_text(font_help, 34, y + 114, screen_w - 68, 22, free_label, ALIGN_LEFT | VALIGN_MIDDLE);
+    }
     if (st.default_target[0]) {
         char path_label[280];
         virtual_path_label(st.default_target, path_label, sizeof(path_label));

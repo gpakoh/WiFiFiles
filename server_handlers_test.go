@@ -462,3 +462,24 @@ func TestHandleMkdirAndDeleteNegatives(t *testing.T) {
 		t.Fatalf("delete ok = %d", rr.Code)
 	}
 }
+
+func TestStopLockedNilServers(t *testing.T) {
+	sm := newTestServiceManager(t)
+
+	sm.stopHTTPLocked()
+	if sm.httpSrv != nil {
+		t.Fatal("httpSrv not nil after stop")
+	}
+
+	sm.stopFTPLocked()
+	if sm.ftpSrv != nil {
+		t.Fatal("ftpSrv not nil after stop")
+	}
+
+	sm.smbPort = 4445
+	sm.smbKey = "abc"
+	sm.stopSMBLocked()
+	if sm.smbPort != 0 || sm.smbKey != "" {
+		t.Fatalf("smb state not reset: %d %q", sm.smbPort, sm.smbKey)
+	}
+}

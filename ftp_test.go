@@ -545,3 +545,48 @@ func TestPathStatus(t *testing.T) {
 		t.Fatalf("pathStatus(file) = %q, want not a directory", got)
 	}
 }
+
+func TestFTPRenameAndStoreNegatives(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("RNFR missing.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RNFR missing: %q", got)
+	}
+	if got := c.cmd("RNTO somewhere"); !strings.HasPrefix(got, "503 ") {
+		t.Fatalf("RNTO without RNFR: %q", got)
+	}
+
+	if got := c.cmd("CWD internal/nowhere"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("CWD missing: %q", got)
+	}
+
+	if got := c.cmd("STOR internal/nodir/new.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("STOR missing parent: %q", got)
+	}
+
+	if got := c.cmd("STOR internal/Books/new.fb2"); !strings.HasPrefix(got, "425 ") {
+		t.Fatalf("STOR without PASV should be 425: %q", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(app.roots["internal"], "Books", "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cmd("RNFR internal/Books/a.txt"); !strings.HasPrefix(got, "350 ") {
+		t.Fatalf("RNFR ok: %q", got)
+	}
+	if got := c.cmd("RNTO internal/system/x.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RNTO into protected path should be 550: %q", got)
+	}
+	if got := c.cmd("RNFR internal/Books/a.txt"); !strings.HasPrefix(got, "350 ") {
+		t.Fatalf("RNFR ok 2: %q", got)
+	}
+	if got := c.cmd("RNTO internal/Books/b.txt"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RNTO ok: %q", got)
+	}
+
+	if got := c.cmd("APPE internal/Books/nope/c.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("APPE missing parent: %q", got)
+	}
+}

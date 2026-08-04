@@ -269,6 +269,11 @@ func (a *App) rememberTarget(virtual string) {
 	a.cfgMu.Unlock()
 	if changed {
 		_ = a.saveConfig()
+		a.cfgMu.RLock()
+		defaultTarget := a.cfg.DefaultTarget
+		recent := append([]string(nil), a.cfg.RecentTargets...)
+		a.cfgMu.RUnlock()
+		syncStateTargets(runtimeDirPath, defaultTarget, recent)
 	}
 }
 

@@ -1184,6 +1184,48 @@ func nativeSaveDefaultTarget(appDir string) {
 		return
 	}
 	nativeStateCommand(appDir)
+	app.cfgMu.RLock()
+	defaultTarget := app.cfg.DefaultTarget
+	recent := append([]string(nil), app.cfg.RecentTargets...)
+	app.cfgMu.RUnlock()
+	syncStateTargets(appDir, defaultTarget, recent)
+}
+
+// syncStateTargets rewrites the default_target and recentN lines of the
+// native state file from the given values. writeNativeState writes them only
+// when the server starts or services change, so without this the panel would
+// keep showing the previous values until the server restarts.
+func syncStateTargets(appDir, defaultTarget string, recent []string) {
+	statePath := nativeStatePath(appDir)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	lines = setINILine(lines, "default_target", defaultTarget)
+	for i, r := range recent {
+		if i >= maxRecentTargets {
+			break
+		}
+		lines = setINILine(lines, fmt.Sprintf("recent%d", i+1), r)
+	}
+	_ = os.WriteFile(statePath, []byte(strings.Join(lines, "\n")), 0666)
+	_ = os.Chmod(statePath, 0666)
+}
+
+func setINILine(lines []string, key, value string) []string {
+	prefix := key + "="
+	found := false
+	for i := range lines {
+		if strings.HasPrefix(lines[i], prefix) {
+			lines[i] = prefix + cleanINIValue(value)
+			found = true
+		}
+	}
+	if !found {
+		lines = append(lines, prefix+cleanINIValue(value))
+	}
+	return lines
 }
 
 func writeNativeINI(path string, lines []string) {
@@ -2011,6 +2053,11 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		nativeStateCommand("")
+		a.cfgMu.RLock()
+		defaultTarget := a.cfg.DefaultTarget
+		recent := append([]string(nil), a.cfg.RecentTargets...)
+		a.cfgMu.RUnlock()
+		syncStateTargets(runtimeDirPath, defaultTarget, recent)
 		http.Redirect(w, r, "/settings?msg="+url.QueryEscape("default target cleared"), http.StatusSeeOther)
 		return
 	}

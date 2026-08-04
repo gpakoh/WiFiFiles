@@ -658,3 +658,47 @@ func TestRememberTargetDedupAndCap(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncStateTargets(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "native_state.ini")
+	original := "ip=192.168.1.5\nrunning=1\ndefault_target=internal/Books\nrecent1=internal/Books\nrecent2=sd/Books\n"
+	if err := os.WriteFile(statePath, []byte(original), 0666); err != nil {
+		t.Fatal(err)
+	}
+	syncStateTargets(dir, "sd/New", []string{"sd/New", "internal/Books"})
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	wantContains := []string{"ip=192.168.1.5", "default_target=sd/New", "recent1=sd/New", "recent2=internal/Books"}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Fatalf("state missing %q in:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "default_target=internal/Books") {
+		t.Fatalf("state still has old default_target:\n%s", got)
+	}
+}
+
+func TestSyncStateTargetsAppendsMissing(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "native_state.ini")
+	if err := os.WriteFile(statePath, []byte("running=0\n"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	syncStateTargets(dir, "internal/Books", []string{"internal/Books"})
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "default_target=internal/Books") {
+		t.Fatalf("state missing appended default_target:\n%s", got)
+	}
+	if !strings.Contains(got, "recent1=internal/Books") {
+		t.Fatalf("state missing appended recent1:\n%s", got)
+	}
+}

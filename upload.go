@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const maxMobileTokens = 8
+const (
+	maxMobileTokens        = 8
+	maxMobileFilesPerToken = 100
+)
 
 func readMobileTokens() ([]MobileTokenRecord, error) {
 	data, err := os.ReadFile(mobileTokenPath)

@@ -110,6 +110,30 @@ func (a *App) getMobileReceipt(token, uploadID string) (MobileUploadResult, bool
 	return result, ok
 }
 
+func (a *App) mobileUploadCount(token string) int {
+	a.mobileMu.Lock()
+	defer a.mobileMu.Unlock()
+	results := a.mobileReceipts[token]
+	if results == nil {
+		data, err := os.ReadFile(mobileReceiptPath)
+		if err != nil {
+			return 0
+		}
+		var store mobileReceiptStore
+		if json.Unmarshal(data, &store) != nil || store.Receipts == nil {
+			return 0
+		}
+		results = store.Receipts[token]
+	}
+	count := 0
+	for _, r := range results {
+		if r.Status == "uploaded" || r.Status == "renamed" {
+			count++
+		}
+	}
+	return count
+}
+
 func (a *App) saveMobileReceipt(token, uploadID string, result MobileUploadResult) {
 	a.mobileMu.Lock()
 	defer a.mobileMu.Unlock()
@@ -388,6 +412,10 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 		mobileJSON(w, http.StatusOK, result)
 		return
 	}
+	if a.mobileUploadCount(token) >= maxMobileFilesPerToken {
+		mobileJSON(w, http.StatusTooManyRequests, map[string]string{"error": "Достигнут лимит файлов для этой ссылки — создайте новый QR-код"})
+		return
+	}
 
 	name, err := safeUploadName(strings.TrimSpace(r.URL.Query().Get("name")))
 	if err != nil || !isBookFile(name) {
@@ -540,6 +568,10 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 	}
 	if !fileSeen || tmpPath == "" {
 		mobileJSON(w, http.StatusBadRequest, map[string]string{"error": "Файл не выбран"})
+		return
+	}
+	if a.mobileUploadCount(token) >= maxMobileFilesPerToken {
+		mobileJSON(w, http.StatusTooManyRequests, map[string]string{"error": "Достигнут лимит файлов для этой ссылки — создайте новый QR-код"})
 		return
 	}
 

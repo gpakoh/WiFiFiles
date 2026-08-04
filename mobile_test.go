@@ -563,3 +563,27 @@ func TestMobileTokenQueueExpiredTokenDoesNotKillLiveReceipts(t *testing.T) {
 		t.Fatalf("queue=%+v err=%v", records, err)
 	}
 }
+
+func TestMobileUploadEnforcesPerTokenFileLimit(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "safe")
+	for i := 0; i < maxMobileFilesPerToken; i++ {
+		rr, result := mobileUploadRequest(t, app, token, fmt.Sprintf("id-%03d", i), fmt.Sprintf("book%03d.epub", i), "contents")
+		if rr.Code != http.StatusOK || result.Status != "uploaded" {
+			t.Fatalf("upload %d: status=%d result=%+v", i, rr.Code, result)
+		}
+	}
+	rr, result := mobileUploadRequest(t, app, token, "over-limit", "over.epub", "contents")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit status=%d result=%+v", rr.Code, result)
+	}
+	if !strings.Contains(rr.Body.String(), "лимит") {
+		t.Fatalf("over-limit body missing limit message: %s", rr.Body.String())
+	}
+	entries, err := os.ReadDir(books)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != maxMobileFilesPerToken {
+		t.Fatalf("files on disk=%d want=%d", len(entries), maxMobileFilesPerToken)
+	}
+}

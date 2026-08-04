@@ -348,7 +348,7 @@ func TestWebIndexTemplateRendersDestinationPicker(t *testing.T) {
 	rr := httptest.NewRecorder()
 	app.renderIndex(rr, "internal/Books", "", "")
 	body := rr.Body.String()
-	for _, want := range []string{"name=\"target\"", "Внутренняя память / Books / SciFi", "Заменять файлы", "upload-files"} {
+	for _, want := range []string{"name=\"target\"", "internal storage / Books / SciFi", "Заменять файлы", "upload-files"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("rendered page does not contain %q", want)
 		}

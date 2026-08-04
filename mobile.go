@@ -48,10 +48,10 @@ func normalizeMobileMode(mode string) string {
 func strictMobileName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." || strings.ContainsRune(name, 0) {
-		return "", errors.New("некорректное имя файла")
+		return "", errors.New("invalid filename")
 	}
 	if strings.ContainsAny(name, "/\\") || filepath.Base(name) != name {
-		return "", errors.New("имя не должно содержать путь")
+		return "", errors.New("filename must not contain a path")
 	}
 	return name, nil
 }
@@ -219,19 +219,19 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		mobileJSON(w, http.StatusOK, map[string]any{"ok": true, "indexed": count})
 	case action == "download" && r.Method == http.MethodGet:
 		if record.Mode != "edit" {
-			http.Error(w, "режим только для передачи", http.StatusForbidden)
+			http.Error(w, "upload only", http.StatusForbidden)
 			return
 		}
 		a.handleMobileDownload(w, r, targetDir)
 	case action == "download-all" && r.Method == http.MethodGet:
 		if record.Mode != "edit" {
-			http.Error(w, "режим только для передачи", http.StatusForbidden)
+			http.Error(w, "upload only", http.StatusForbidden)
 			return
 		}
 		a.handleMobileDownloadAll(w, r, targetDir)
 	case action == "delete" && r.Method == http.MethodPost:
 		if record.Mode != "edit" {
-			http.Error(w, "режим только для передачи", http.StatusForbidden)
+			http.Error(w, "upload only", http.StatusForbidden)
 			return
 		}
 		name, err := strictMobileName(r.FormValue("name"))
@@ -254,7 +254,7 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		mobileRedirect(w, r, token, "msg", "Удалено: "+name)
 	case action == "delete-all" && r.Method == http.MethodPost:
 		if record.Mode != "edit" {
-			http.Error(w, "режим только для передачи", http.StatusForbidden)
+			http.Error(w, "upload only", http.StatusForbidden)
 			return
 		}
 		count, err := a.deleteAllMobileFiles(targetDir)
@@ -266,7 +266,7 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		mobileRedirect(w, r, token, "msg", fmt.Sprintf("Удалено файлов: %d", count))
 	case action == "rename" && r.Method == http.MethodPost:
 		if record.Mode != "edit" {
-			http.Error(w, "режим только для передачи", http.StatusForbidden)
+			http.Error(w, "upload only", http.StatusForbidden)
 			return
 		}
 		oldName, err := strictMobileName(r.FormValue("old"))
@@ -317,7 +317,7 @@ func readMultipartText(part io.Reader, max int64) (string, error) {
 		return "", err
 	}
 	if int64(len(data)) > max {
-		return "", errors.New("поле формы слишком большое")
+		return "", errors.New("form field too large")
 	}
 	return string(data), nil
 }
@@ -581,7 +581,7 @@ func (a *App) handleMobileDownloadAll(w http.ResponseWriter, r *http.Request, ta
 		return
 	}
 	if len(files) == 0 {
-		http.Error(w, "В выбранной папке нет файлов", http.StatusNotFound)
+		http.Error(w, "no files in selected folder", http.StatusNotFound)
 		return
 	}
 
@@ -626,7 +626,7 @@ func (a *App) deleteAllMobileFiles(targetDir string) (int, error) {
 	deleted := 0
 	for _, item := range files {
 		if err := os.Remove(item.path); err != nil {
-			return deleted, fmt.Errorf("удалено %d, затем ошибка: %w", deleted, err)
+			return deleted, fmt.Errorf("deleted %d, then error: %w", deleted, err)
 		}
 		a.scheduleLibraryRefresh(item.path)
 		deleted++

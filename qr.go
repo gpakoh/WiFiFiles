@@ -14,7 +14,7 @@ func qrVersion5L(text string) ([]string, error) {
 	)
 	data := []byte(text)
 	if len(data) > 106 {
-		return nil, errors.New("QR URL is too long")
+		return nil, errors.New("qR URL is too long")
 	}
 
 	bits := make([]bool, 0, dataCodewords*8)
@@ -160,7 +160,7 @@ func qrVersion5L(text string) ([]string, error) {
 		}
 	}
 	if bitIndex != len(codewords)*8 {
-		return nil, errors.New("QR data placement failed")
+		return nil, errors.New("qR data placement failed")
 	}
 	rows := make([]string, size)
 	for y := 0; y < size; y++ {

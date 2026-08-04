@@ -616,7 +616,7 @@ func (d *DAVServer) handlePropfind(w http.ResponseWriter, r *http.Request) {
 		depth = "infinity"
 	}
 	if depth != "0" && depth != "1" && depth != "infinity" {
-		http.Error(w, "WebDAV Depth должен быть 0, 1 или infinity", http.StatusForbidden)
+		http.Error(w, "WebDAV Depth must be 0, 1, or infinity", http.StatusForbidden)
 		return
 	}
 	resource, err := d.stat(davRequestPath(r))
@@ -728,7 +728,7 @@ func (d *DAVServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 func (d *DAVServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Content-Range") != "" {
-		http.Error(w, "Content-Range не поддерживается", http.StatusBadRequest)
+		http.Error(w, "Content-Range not supported", http.StatusBadRequest)
 		return
 	}
 	full, canonical, err := d.resolve(davRequestPath(r), false, true)
@@ -842,20 +842,20 @@ func (d *DAVServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 func destinationDAVPath(r *http.Request) (string, error) {
 	raw := strings.TrimSpace(r.Header.Get("Destination"))
 	if raw == "" {
-		return "", errors.New("Destination header is missing")
+		return "", errors.New("destination header is missing")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
 	if u.Host != "" && !strings.EqualFold(u.Host, r.Host) {
-		return "", errors.New("Destination points to another host")
+		return "", errors.New("destination points to another host")
 	}
 	if u.Path == "/dav" {
 		return "/", nil
 	}
 	if !strings.HasPrefix(u.Path, "/dav/") {
-		return "", errors.New("Destination is outside WebDAV")
+		return "", errors.New("destination is outside WebDAV")
 	}
 	return pathpkg.Clean("/" + strings.TrimPrefix(u.Path, "/dav/")), nil
 }
@@ -1291,7 +1291,7 @@ func (d *DAVServer) writeLockResponse(w http.ResponseWriter, lock davLock, statu
 func (d *DAVServer) handleUnlock(w http.ResponseWriter, r *http.Request) {
 	token := parseDAVToken(r.Header.Get("Lock-Token"))
 	if token == "" {
-		http.Error(w, "Lock-Token отсутствует", http.StatusBadRequest)
+		http.Error(w, "Lock-Token required", http.StatusBadRequest)
 		return
 	}
 	d.mu.Lock()

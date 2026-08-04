@@ -1,29 +1,20 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
-	"iter"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
-	pathpkg "path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,10 +24,11 @@ import (
 
 	smbntlm "github.com/sonroyaalmerol/go-smb-server/smb/ntlmssp"
 	smbserver "github.com/sonroyaalmerol/go-smb-server/smb/server"
-	smbvfs "github.com/sonroyaalmerol/go-smb-server/smb/vfs"
 )
 
 const version = "0.7.22"
+
+const controlPort = 8090
 
 var chmodFile = os.Chmod
 
@@ -100,322 +92,6 @@ type App struct {
 	mobilePending  map[string]map[string]struct{}
 	mobileTimers   map[string]*time.Timer
 	mobileReceipts map[string]map[string]MobileUploadResult
-}
-
-var bookFileSuffixes = []string{
-	".epub", ".fb2", ".fb2.zip", ".pdf", ".djvu", ".djv", ".mobi", ".prc",
-	".azw", ".azw3", ".txt", ".rtf", ".doc", ".docx", ".chm", ".html", ".htm",
-	".cbz", ".cbr", ".tcr", ".pdb",
-}
-
-func isBookFile(path string) bool {
-	name := strings.ToLower(filepath.Base(path))
-	for _, suffix := range bookFileSuffixes {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-const uploadSafetyReserve = uint64(4 << 20)
-
-func availableBytes(path string) (uint64, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, err
-	}
-	return uint64(st.Bavail) * uint64(st.Bsize), nil
-}
-
-func totalUploadBytes(files []*multipart.FileHeader) uint64 {
-	var total uint64
-	for _, file := range files {
-		if file != nil && file.Size > 0 {
-			total += uint64(file.Size)
-		}
-	}
-	return total
-}
-
-func ensureUploadSpace(dir string, files []*multipart.FileHeader) error {
-	required := totalUploadBytes(files)
-	free, err := availableBytes(dir)
-	if err != nil {
-		return fmt.Errorf("не удалось проверить свободное место: %w", err)
-	}
-	if required+uploadSafetyReserve > free {
-		return fmt.Errorf("недостаточно свободного места: требуется %s, доступно %s", humanSize(int64(required)), humanSize(int64(free)))
-	}
-	return nil
-}
-
-func freeSpaceText(path string) string {
-	free, err := availableBytes(path)
-	if err != nil {
-		return "не удалось определить"
-	}
-	return humanSize(int64(free))
-}
-
-func ensureRequestUploadSpace(dir string, contentLength int64) error {
-	if contentLength <= 0 {
-		return nil
-	}
-	free, err := availableBytes(dir)
-	if err != nil {
-		return fmt.Errorf("не удалось проверить свободное место: %w", err)
-	}
-	required := uint64(contentLength)
-	if required+uploadSafetyReserve > free {
-		return fmt.Errorf("недостаточно свободного места: требуется около %s, доступно %s", humanSize(contentLength), humanSize(int64(free)))
-	}
-	return nil
-}
-
-// writeStreamTemp writes an incoming upload directly into the selected reader
-// folder. It deliberately avoids ParseMultipartForm/FileHeader.Open because Go's
-// multipart parser spills large parts into the tiny PocketBook /tmp filesystem.
-func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
-	tmp, err := os.CreateTemp(dir, ".wififiles-upload-*.part")
-	if err != nil {
-		return "", 0, err
-	}
-	tmpPath := tmp.Name()
-	ok := false
-	defer func() {
-		_ = tmp.Close()
-		if !ok {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	chmodBestEffort(tmpPath, 0644)
-	buf := make([]byte, 64<<10)
-	written, err := io.CopyBuffer(tmp, src, buf)
-	if err != nil {
-		return "", written, err
-	}
-	if err := tmp.Sync(); err != nil {
-		return "", written, err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", written, err
-	}
-	ok = true
-	return tmpPath, written, nil
-}
-
-func writeMultipartTemp(dir string, hdr *multipart.FileHeader) (string, error) {
-	src, err := hdr.Open()
-	if err != nil {
-		return "", err
-	}
-	defer src.Close()
-	tmpPath, _, err := writeStreamTemp(dir, src)
-	return tmpPath, err
-}
-
-func commitTempAutoRename(dir, name, tmpPath string) (string, error) {
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	for i := 0; i < 10000; i++ {
-		candidate := name
-		if i > 0 {
-			candidate = fmt.Sprintf("%s (%d)%s", base, i, ext)
-		}
-		finalPath := filepath.Join(dir, candidate)
-		if _, statErr := os.Stat(finalPath); statErr == nil {
-			continue
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return "", statErr
-		}
-		if err := os.Rename(tmpPath, finalPath); err != nil {
-			return "", err
-		}
-		return candidate, nil
-	}
-	return "", errors.New("too many files with the same name")
-}
-
-func libraryScanTarget(filePath string) (string, bool) {
-	if !isBookFile(filePath) {
-		return "", false
-	}
-	clean := filepath.Clean(filePath)
-	for _, root := range []string{"/mnt/ext1", "/mnt/ext2"} {
-		if clean != root && strings.HasPrefix(clean, root+string(os.PathSeparator)) {
-			rel, err := filepath.Rel(root, clean)
-			if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				return "", false
-			}
-			first := strings.Split(filepath.ToSlash(rel), "/")[0]
-			if blockedSMBName(first) {
-				return "", false
-			}
-			return filepath.Dir(clean), true
-		}
-	}
-	return "", false
-}
-
-func collapseLibraryTargets(targets []string) []string {
-	sort.Slice(targets, func(i, j int) bool {
-		if len(targets[i]) == len(targets[j]) {
-			return targets[i] < targets[j]
-		}
-		return len(targets[i]) < len(targets[j])
-	})
-	result := make([]string, 0, len(targets))
-	for _, target := range targets {
-		covered := false
-		for _, parent := range result {
-			if target == parent || strings.HasPrefix(target, parent+string(os.PathSeparator)) {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			result = append(result, target)
-		}
-	}
-	return result
-}
-
-func findPocketBookExecutable(candidates ...string) string {
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if !strings.ContainsRune(candidate, os.PathSeparator) {
-			if found, err := exec.LookPath(candidate); err == nil {
-				return found
-			}
-			continue
-		}
-		if st, err := os.Stat(candidate); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0111 != 0 {
-			return candidate
-		}
-	}
-	return ""
-}
-
-func (a *App) scheduleLibraryRefresh(filePath string) {
-	target, ok := libraryScanTarget(filePath)
-	if !ok {
-		return
-	}
-	a.libraryMu.Lock()
-	if a.libraryTargets == nil {
-		a.libraryTargets = make(map[string]struct{})
-	}
-	a.libraryTargets[target] = struct{}{}
-	if a.libraryTimer != nil {
-		a.libraryTimer.Stop()
-	}
-	a.libraryTimer = time.AfterFunc(2500*time.Millisecond, a.flushLibraryRefresh)
-	a.libraryMu.Unlock()
-}
-
-func (a *App) flushLibraryRefresh() {
-	a.libraryMu.Lock()
-	targets := make([]string, 0, len(a.libraryTargets))
-	for target := range a.libraryTargets {
-		targets = append(targets, target)
-	}
-	a.libraryTargets = make(map[string]struct{})
-	a.libraryTimer = nil
-	a.libraryMu.Unlock()
-
-	targets = collapseLibraryTargets(targets)
-	if len(targets) == 0 {
-		return
-	}
-	a.runPocketBookScanner(targets)
-}
-
-func (a *App) runPocketBookScanner(targets []string) {
-	scanner := findPocketBookExecutable(
-		"/mnt/ext1/system/bin/scanner.app",
-		"/ebrmain/bin/scanner.app",
-		"/ebrmain/cramfs/bin/scanner.app",
-	)
-	if scanner == "" {
-		appendLog(runtimeDirPath, "Library refresh skipped: scanner.app not found")
-		return
-	}
-	logFile, err := os.CreateTemp("/tmp", "wififiles-library-scan-")
-	if err != nil {
-		appendLog(runtimeDirPath, "Library refresh log: "+err.Error())
-		return
-	}
-	logPath := logFile.Name()
-	cmd := exec.Command(scanner)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		_ = os.Remove(logPath)
-		appendLog(runtimeDirPath, fmt.Sprintf("Library refresh start failed: %v", err))
-		return
-	}
-	appendLog(runtimeDirPath, "Library refresh started for: "+strings.Join(targets, ", "))
-
-	go func() {
-		defer os.Remove(logPath)
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		timeout := time.NewTimer(30 * time.Second)
-		defer timeout.Stop()
-		expectedStop := false
-
-		stopScanner := func(reason string) error {
-			expectedStop = true
-			appendLog(runtimeDirPath, "Library refresh stopping: "+reason)
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			select {
-			case waitErr := <-done:
-				return waitErr
-			case <-time.After(3 * time.Second):
-				_ = cmd.Process.Kill()
-				return <-done
-			}
-		}
-
-		var waitErr error
-		finished := false
-		for !finished {
-			select {
-			case waitErr = <-done:
-				finished = true
-			case <-ticker.C:
-				_ = logFile.Sync()
-				if data, readErr := os.ReadFile(logPath); readErr == nil && strings.Contains(string(data), "Scan finished") {
-					waitErr = stopScanner("scan completed")
-					finished = true
-				}
-			case <-timeout.C:
-				waitErr = stopScanner("30-second safety timeout")
-				finished = true
-			}
-		}
-		_ = logFile.Close()
-		if data, readErr := os.ReadFile(logPath); readErr == nil {
-			text := strings.TrimSpace(string(data))
-			if len(text) > 2048 {
-				text = text[len(text)-2048:]
-			}
-			if text != "" {
-				appendLog(runtimeDirPath, "Library scanner output: "+text)
-			}
-		}
-		if waitErr != nil && !expectedStop {
-			appendLog(runtimeDirPath, "Library refresh process: "+waitErr.Error())
-		} else {
-			appendLog(runtimeDirPath, "Library refresh finished")
-		}
-	}()
 }
 
 type Entry struct {
@@ -488,20 +164,6 @@ type ControlData struct {
 	UID              int
 	Message          string
 	Error            string
-}
-
-const controlPort = 8090
-
-func smbListenPort(cfg Config) int {
-	if value := strings.TrimSpace(os.Getenv("WIFIFILES_SMB_PORT")); value != "" {
-		if port, err := strconv.Atoi(value); err == nil && port >= 1024 && port <= 65535 {
-			return port
-		}
-	}
-	if cfg.SMBPort >= 1024 && cfg.SMBPort <= 65535 {
-		return cfg.SMBPort
-	}
-	return 4445
 }
 
 func stopManagerPID(pid int) {
@@ -615,163 +277,6 @@ type ServiceManager struct {
 	stopOnce  sync.Once
 }
 
-type smbCredentialLookup struct {
-	username string
-	ntHash   []byte
-}
-
-type safeSMBBackend struct {
-	base     *smbvfs.LocalBackend
-	root     string
-	onChange func(string)
-}
-
-type safeSMBHandle struct {
-	base     smbvfs.Handle
-	rootEnum bool
-	root     string
-	path     string
-	onChange func(string)
-	changed  bool
-}
-
-func blockedSMBName(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
-	switch name {
-	case "system", "applications", ".wififiles", "wififiles.log", "wififiles_preparation.log",
-		"system volume information", "lost.dir", ".adobe-digital-editions", ".adobe-hidden-files":
-		return true
-	default:
-		return false
-	}
-}
-
-func blockedSMBPath(value string) bool {
-	value = strings.ReplaceAll(value, "\\", "/")
-	value = strings.Trim(pathpkg.Clean("/"+value), "/")
-	if value == "" || value == "." {
-		return false
-	}
-	first := value
-	if i := strings.IndexByte(first, '/'); i >= 0 {
-		first = first[:i]
-	}
-	return blockedSMBName(first)
-}
-
-func newSafeSMBBackend(root string, callbacks ...func(string)) (*safeSMBBackend, error) {
-	base, err := smbvfs.NewLocalBackend(root)
-	if err != nil {
-		return nil, err
-	}
-	var onChange func(string)
-	if len(callbacks) > 0 {
-		onChange = callbacks[0]
-	}
-	return &safeSMBBackend{base: base, root: filepath.Clean(root), onChange: onChange}, nil
-}
-
-func (b *safeSMBBackend) Open(ctx context.Context, opts smbvfs.OpenOptions) (smbvfs.Handle, error) {
-	if blockedSMBPath(opts.Path) {
-		return nil, os.ErrPermission
-	}
-	h, err := b.base.Open(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	clean := strings.Trim(pathpkg.Clean("/"+strings.ReplaceAll(opts.Path, "\\", "/")), "/")
-	full := b.root
-	if clean != "" && clean != "." {
-		full = filepath.Join(b.root, filepath.FromSlash(clean))
-	}
-	return &safeSMBHandle{base: h, rootEnum: clean == "" || clean == ".", root: b.root, path: full, onChange: b.onChange}, nil
-}
-
-func (b *safeSMBBackend) Remove(ctx context.Context, value string) error {
-	if blockedSMBPath(value) {
-		return os.ErrPermission
-	}
-	return b.base.Remove(ctx, value)
-}
-
-func (b *safeSMBBackend) Mkdir(ctx context.Context, value string) error {
-	if blockedSMBPath(value) {
-		return os.ErrPermission
-	}
-	return b.base.Mkdir(ctx, value)
-}
-
-func (h *safeSMBHandle) Read(ctx context.Context, offset int64, p []byte) (int, error) {
-	return h.base.Read(ctx, offset, p)
-}
-
-func (h *safeSMBHandle) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	n, err := h.base.Write(ctx, offset, p)
-	if n > 0 {
-		h.changed = true
-	}
-	return n, err
-}
-
-func (h *safeSMBHandle) Close(ctx context.Context) error {
-	err := h.base.Close(ctx)
-	if err == nil && h.changed && h.onChange != nil {
-		h.onChange(h.path)
-	}
-	return err
-}
-func (h *safeSMBHandle) Stat(ctx context.Context) (smbvfs.FileInfo, error) {
-	return h.base.Stat(ctx)
-}
-
-func (h *safeSMBHandle) Enumerate(ctx context.Context, pattern string) iter.Seq2[smbvfs.FileInfo, error] {
-	return func(yield func(smbvfs.FileInfo, error) bool) {
-		for info, err := range h.base.Enumerate(ctx, pattern) {
-			if err != nil {
-				yield(info, err)
-				return
-			}
-			if h.rootEnum && blockedSMBName(info.Name) {
-				continue
-			}
-			if !yield(info, nil) {
-				return
-			}
-		}
-	}
-}
-
-func (h *safeSMBHandle) SetInfo(ctx context.Context, req *smbvfs.SetInfoRequest) error {
-	if setter, ok := h.base.(smbvfs.SetInfoer); ok {
-		return setter.SetInfo(ctx, req)
-	}
-	return errors.New("SMB SetInfo is not supported")
-}
-
-func (h *safeSMBHandle) Rename(ctx context.Context, newPath string, replace bool) error {
-	if blockedSMBPath(newPath) {
-		return os.ErrPermission
-	}
-	if renamer, ok := h.base.(smbvfs.Renamer); ok {
-		if err := renamer.Rename(ctx, newPath, replace); err != nil {
-			return err
-		}
-		if h.onChange != nil {
-			clean := strings.Trim(pathpkg.Clean("/"+strings.ReplaceAll(newPath, "\\", "/")), "/")
-			h.onChange(filepath.Join(h.root, filepath.FromSlash(clean)))
-		}
-		return nil
-	}
-	return errors.New("SMB rename is not supported")
-}
-
-func (c smbCredentialLookup) LookupNTOWFv2(_ context.Context, domain, user string) ([]byte, error) {
-	if !strings.EqualFold(strings.TrimSpace(user), strings.TrimSpace(c.username)) {
-		return nil, smbntlm.ErrUnknownUser
-	}
-	return smbntlm.NTOWFv2FromNTHash(c.ntHash, user, domain), nil
-}
-
 func launchManagerAndUI(appDir string) {
 	pid, alive := readLivePID(appDir)
 	// WiFiFiles 0.1.x left a standalone HTTP process under the same PID file.
@@ -850,9 +355,9 @@ func launchManagerAndUI(appDir string) {
 	target := fmt.Sprintf("http://%s:%d/", ips[0], controlPort)
 	if err := launchPocketBookBrowser(appDir, target); err != nil {
 		text := "WiFiFiles запущен, но штатный браузер не открылся.\n"
-		text += "Откройте на ридере браузер и введите: " + target + "\n"
-		text += "С другого устройства панель запросит логин и пароль WiFiFiles.\n"
-		text += "Ошибка браузера: " + err.Error() + "\n"
+		text += "Open the browser on the reader and enter: " + target + "\n"
+		text += "From another device the panel will ask for WiFiFiles credentials.\n"
+		text += "browser error: " + err.Error() + "\n"
 		writeStatus(text)
 		appendLog(appDir, "browser: "+err.Error())
 	}
@@ -918,7 +423,7 @@ func launchPocketBookBrowser(appDir, target string) error {
 		}
 	}
 	if len(errs) == 0 {
-		return errors.New("исполняемый файл браузера не найден")
+		return errors.New("browser executable not found")
 	}
 	return errors.New(strings.Join(errs, "; "))
 }
@@ -975,16 +480,16 @@ func writeManagerStatus(sm *ServiceManager) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "WiFiFiles %s включен.\n", version)
 	if len(ips) > 0 {
-		fmt.Fprintf(&b, "Панель управления: http://%s:%d/\n", ips[0], controlPort)
+		fmt.Fprintf(&b, "Control panel: http://%s:%d/\n", ips[0], controlPort)
 	} else {
-		fmt.Fprintf(&b, "Панель управления слушает порт %d; Wi-Fi IP пока не определён.\n", controlPort)
+		fmt.Fprintf(&b, "Control panel listening on port %d; Wi-Fi IP not yet determined.\n", controlPort)
 	}
 	if len(ips) == 0 {
 		b.WriteString("Wi-Fi IP пока не определён.\n")
 	} else {
 		for _, ip := range ips {
 			if cfg.HTTPEnabled {
-				fmt.Fprintf(&b, "Веб-файлы: http://%s:%d/\n", ip, cfg.HTTPPort)
+				fmt.Fprintf(&b, "Web files: http://%s:%d/\n", ip, cfg.HTTPPort)
 				fmt.Fprintf(&b, "WebDAV root: http://%s:%d/dav/\nWebDAV internal: http://%s:%d/dav/internal/\nWebDAV SD: http://%s:%d/dav/sd/\n", ip, cfg.HTTPPort, ip, cfg.HTTPPort, ip, cfg.HTTPPort)
 			}
 			if cfg.FTPEnabled {
@@ -1000,7 +505,7 @@ func writeManagerStatus(sm *ServiceManager) {
 			}
 		}
 	}
-	fmt.Fprintf(&b, "Логин: %s\nПароль: установлен в панели управления.\n", cfg.Username)
+	fmt.Fprintf(&b, "Username: %s\nPassword: set in the control panel.\n", cfg.Username)
 	writeStatus(b.String())
 }
 
@@ -1084,101 +589,6 @@ func (sm *ServiceManager) applyServices() {
 	sm.mu.Unlock()
 	writeManagerStatus(sm)
 	writeNativeState(sm, "")
-}
-
-func (sm *ServiceManager) startSMBLocked(cfg Config, key string) {
-	if strings.TrimSpace(cfg.SMBNTHash) == "" {
-		sm.smbErr = "Для SMB введите пароль заново и нажмите Старт"
-		appendLog(sm.appDir, "SMB not started: NT hash is missing")
-		return
-	}
-	ntHash, err := hex.DecodeString(cfg.SMBNTHash)
-	if err != nil || len(ntHash) != 16 {
-		sm.smbErr = "Повреждены данные пароля SMB; введите пароль заново"
-		appendLog(sm.appDir, "SMB credentials: invalid NT hash")
-		return
-	}
-
-	shares := make([]smbvfs.Share, 0, 2)
-	if cfg.InternalEnabled {
-		if st, statErr := os.Stat("/mnt/ext1"); statErr == nil && st.IsDir() {
-			backend, backendErr := newSafeSMBBackend("/mnt/ext1", sm.app.scheduleLibraryRefresh)
-			if backendErr != nil {
-				sm.smbErr = "Внутренняя память: " + backendErr.Error()
-				return
-			}
-			shares = append(shares, smbvfs.NewDiskShare("INTERNAL", backend))
-		}
-	}
-	if cfg.SDEnabled {
-		if st, statErr := os.Stat("/mnt/ext2"); statErr == nil && st.IsDir() {
-			backend, backendErr := newSafeSMBBackend("/mnt/ext2", sm.app.scheduleLibraryRefresh)
-			if backendErr != nil {
-				sm.smbErr = "Карта SD: " + backendErr.Error()
-				return
-			}
-			shares = append(shares, smbvfs.NewDiskShare("SDCARD", backend))
-		}
-	}
-	if len(shares) == 0 {
-		sm.smbErr = "Нет доступной памяти для SMB"
-		return
-	}
-
-	port := smbListenPort(cfg)
-	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
-	if err != nil {
-		sm.smbErr = friendlySMBListenError(port, err)
-		appendLog(sm.appDir, fmt.Sprintf("SMB listen :%d: %v", port, err))
-		return
-	}
-	lookup := smbCredentialLookup{username: cfg.Username, ntHash: ntHash}
-	srv, err := smbserver.New(
-		smbserver.WithAuth(smbntlm.NewServer(lookup, "POCKETBOOK")),
-		smbserver.WithShares(shares...),
-	)
-	if err != nil {
-		_ = ln.Close()
-		sm.smbErr = err.Error()
-		appendLog(sm.appDir, "SMB init: "+err.Error())
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	sm.smbSrv = srv
-	sm.smbCancel = cancel
-	sm.smbPort = port
-	sm.smbErr = ""
-	sm.smbKey = key
-	appendLog(sm.appDir, fmt.Sprintf("SMB2/3 started on :%d", port))
-	go func(server *smbserver.Server, serverCtx context.Context) {
-		err := server.Serve(serverCtx, ln)
-		unexpected := err != nil && serverCtx.Err() == nil
-		sm.mu.Lock()
-		if sm.smbSrv == server {
-			sm.smbSrv = nil
-			sm.smbCancel = nil
-			sm.smbPort = 0
-			sm.smbKey = ""
-			if unexpected {
-				sm.smbErr = err.Error()
-			}
-		}
-		sm.mu.Unlock()
-		if unexpected {
-			appendLog(sm.appDir, "SMB server: "+err.Error())
-			writeNativeState(sm, "Ошибка SMB: "+err.Error())
-		}
-	}(srv, ctx)
-}
-
-func friendlySMBListenError(port int, err error) string {
-	if errors.Is(err, syscall.EACCES) || errors.Is(err, os.ErrPermission) {
-		return fmt.Sprintf("Порт %d запрещён UID %d; выберите порт 1024–65535", port, os.Getuid())
-	}
-	if errors.Is(err, syscall.EADDRINUSE) {
-		return fmt.Sprintf("Порт %d уже занят другим процессом", port)
-	}
-	return err.Error()
 }
 
 func (sm *ServiceManager) stopHTTPLocked() {
@@ -1283,20 +693,11 @@ func (sm *ServiceManager) controlData(r *http.Request) ControlData {
 	data.SMBAvailable, data.SMBReason = sm.smbAvailability()
 	if data.SMBRunning {
 		data.PortSMBAvailable = true
-		data.PortSMBReason = "порт занят сервером WiFiFiles"
+		data.PortSMBReason = "port used by WiFiFiles server"
 	} else {
 		data.PortSMBAvailable, data.PortSMBReason = testListenPort(smbListenPort(cfg))
 	}
 	return data
-}
-
-func (sm *ServiceManager) smbAvailability() (bool, string) {
-	cfg := sm.app.configSnapshot()
-	if cfg.SMBNTHash == "" {
-		return true, "модуль встроен; для первого запуска SMB введите пароль заново"
-	}
-	port := smbListenPort(cfg)
-	return true, fmt.Sprintf("встроенный SMB2/3-сервер работает без root на порту %d; Проводнику Windows для нестандартного порта потребуется локальная переадресация", port)
 }
 
 func testListenPort(port int) (bool, string) {
@@ -1305,7 +706,7 @@ func testListenPort(port int) (bool, string) {
 		return false, err.Error()
 	}
 	_ = ln.Close()
-	return true, "порт доступен процессу приложения"
+	return true, "port available to application"
 }
 
 func requestHost(r *http.Request) string {
@@ -1333,22 +734,6 @@ func isOwnAddress(ip string) bool {
 	return false
 }
 
-func (sm *ServiceManager) controlAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isOwnAddress(remoteIP(r)) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		username, password, ok := r.BasicAuth()
-		if !ok || !sm.app.checkCredentials(username, password) {
-			w.Header().Set("WWW-Authenticate", `Basic realm="WiFiFiles control"`)
-			http.Error(w, "Требуется логин и пароль WiFiFiles", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (sm *ServiceManager) handleControl(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -1366,20 +751,20 @@ func (sm *ServiceManager) handleServices(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Не удалось прочитать настройки"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("failed to read settings"), http.StatusSeeOther)
 		return
 	}
 	httpPort, err1 := strconv.Atoi(r.FormValue("http_port"))
 	ftpPort, err2 := strconv.Atoi(r.FormValue("ftp_port"))
 	smbPort, err3 := strconv.Atoi(r.FormValue("smb_port"))
 	if err1 != nil || httpPort < 1024 || httpPort > 65535 || err2 != nil || ftpPort < 1024 || ftpPort > 65535 || err3 != nil || smbPort < 1024 || smbPort > 65535 || httpPort == ftpPort || httpPort == smbPort || ftpPort == smbPort || httpPort == controlPort || ftpPort == controlPort || smbPort == controlPort {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Порты должны быть разными числами 1024–65535 и не равны 8090"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("ports must be different numbers 1024-65535 and not equal to 8090"), http.StatusSeeOther)
 		return
 	}
 	internalEnabled := r.FormValue("internal") == "on"
 	sdEnabled := r.FormValue("sd") == "on"
 	if !internalEnabled && !sdEnabled {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Выберите хотя бы одну память"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("select at least one storage"), http.StatusSeeOther)
 		return
 	}
 
@@ -1396,7 +781,7 @@ func (sm *ServiceManager) handleServices(w http.ResponseWriter, r *http.Request)
 	sm.app.cfg.SDEnabled = sdEnabled
 	sm.app.cfgMu.Unlock()
 	if err := sm.app.saveConfig(); err != nil {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Не удалось сохранить: "+err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("Failed to save: "+err.Error()), http.StatusSeeOther)
 		return
 	}
 	if !sm.app.configSnapshot().LoggingEnabled {
@@ -1404,7 +789,7 @@ func (sm *ServiceManager) handleServices(w http.ResponseWriter, r *http.Request)
 	}
 	sm.app.resetSessions()
 	sm.applyServices()
-	http.Redirect(w, r, "/?msg="+url.QueryEscape("Настройки служб сохранены"), http.StatusSeeOther)
+	http.Redirect(w, r, "/?msg="+url.QueryEscape("service settings saved"), http.StatusSeeOther)
 }
 
 func (sm *ServiceManager) handleCredentials(w http.ResponseWriter, r *http.Request) {
@@ -1415,11 +800,11 @@ func (sm *ServiceManager) handleCredentials(w http.ResponseWriter, r *http.Reque
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := r.FormValue("password")
 	if len(username) < 3 || len(username) > 32 {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Логин должен содержать 3–32 символа"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("username must be 3-32 characters"), http.StatusSeeOther)
 		return
 	}
 	if password != "" && (len(password) < 6 || len(password) > 128) {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Пароль должен содержать 6–128 символов"), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("password must be 6-128 characters"), http.StatusSeeOther)
 		return
 	}
 	sm.app.cfgMu.Lock()
@@ -1447,12 +832,12 @@ func (sm *ServiceManager) handleCredentials(w http.ResponseWriter, r *http.Reque
 	}
 	sm.app.cfgMu.Unlock()
 	if err := sm.app.saveConfig(); err != nil {
-		http.Redirect(w, r, "/?err="+url.QueryEscape("Не удалось сохранить: "+err.Error()), http.StatusSeeOther)
+		http.Redirect(w, r, "/?err="+url.QueryEscape("Failed to save: "+err.Error()), http.StatusSeeOther)
 		return
 	}
 	sm.app.resetSessions()
 	sm.applyServices()
-	http.Redirect(w, r, "/?msg="+url.QueryEscape("Логин и пароль сохранены"), http.StatusSeeOther)
+	http.Redirect(w, r, "/?msg="+url.QueryEscape("username and password saved"), http.StatusSeeOther)
 }
 
 func (sm *ServiceManager) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -1576,7 +961,7 @@ func startManagerDetached(appDir string) error {
 		return err
 	}
 	if usesDefaultPassword(app.configSnapshot()) {
-		return errors.New("перед первым запуском задайте новый пароль")
+		return errors.New("set a new password before first use")
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -1609,12 +994,12 @@ func startManagerDetached(appDir string) error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return errors.New("менеджер не подтвердил запуск")
+	return errors.New("manager did not confirm launch")
 }
 
 func nativeStart(appDir string) {
 	if err := startManagerDetached(appDir); err != nil {
-		writeNativeStateStopped(appDir, "Ошибка запуска: "+err.Error())
+		writeNativeStateStopped(appDir, "Launch error: "+err.Error())
 		return
 	}
 	nativeStateCommand(appDir)
@@ -1646,7 +1031,7 @@ func nativeStateCommand(appDir string) {
 		_ = os.Remove(filepath.Join(appDir, "wififiles.pid"))
 		_ = os.Remove(filepath.Join(appDir, "wififiles.ready"))
 		if err := startManagerDetached(appDir); err != nil {
-			writeNativeStateStopped(appDir, "Ошибка обновления сервера: "+err.Error())
+			writeNativeStateStopped(appDir, "Server update error: "+err.Error())
 		}
 		return
 	}
@@ -1659,7 +1044,7 @@ func nativeStateCommand(appDir string) {
 		_ = os.Remove(filepath.Join(appDir, "wififiles.ready"))
 		_ = os.Remove(statePath)
 		if err := startManagerDetached(appDir); err != nil {
-			writeNativeStateStopped(appDir, "Ошибка обновления сервера: "+err.Error())
+			writeNativeStateStopped(appDir, "Server update error: "+err.Error())
 		}
 		return
 	}
@@ -1877,14 +1262,14 @@ func nativeApplyFile(appDir string) {
 	}
 	username := strings.TrimSpace(vals["username"])
 	if len(username) < 3 || len(username) > 32 || strings.ContainsAny(username, "\r\n") {
-		writeNativeStateStopped(appDir, "Логин должен содержать 3–32 символа")
+		writeNativeStateStopped(appDir, "Username must be 3-32 characters")
 		return
 	}
 	httpPort, err1 := strconv.Atoi(vals["http_port"])
 	ftpPort, err2 := strconv.Atoi(vals["ftp_port"])
 	smbPort, err3 := strconv.Atoi(vals["smb_port"])
 	if err1 != nil || httpPort < 1024 || httpPort > 65535 || err2 != nil || ftpPort < 1024 || ftpPort > 65535 || err3 != nil || smbPort < 1024 || smbPort > 65535 || httpPort == ftpPort || httpPort == smbPort || ftpPort == smbPort || httpPort == controlPort || ftpPort == controlPort || smbPort == controlPort {
-		writeNativeStateStopped(appDir, "Порты должны быть разными числами 1024–65535 и не равны 8090")
+		writeNativeStateStopped(appDir, "Ports must be different numbers 1024-65535 and not equal to 8090")
 		return
 	}
 	internal := parseNativeBool(vals["internal_enabled"])
@@ -1914,7 +1299,7 @@ func nativeApplyFile(appDir string) {
 	if password != "" {
 		if len(password) < 6 || len(password) > 128 || strings.ContainsAny(password, "\r\n") {
 			app.cfgMu.Unlock()
-			writeNativeStateStopped(appDir, "Пароль должен содержать 6–128 символов")
+			writeNativeStateStopped(appDir, "Password must be 6-128 characters")
 			return
 		}
 		salt, e := randomHex(16)
@@ -1953,7 +1338,7 @@ func nativeApplyFile(appDir string) {
 		_ = os.Remove(filepath.Join(appDir, "wififiles.ready"))
 	}
 	if err := startManagerDetached(appDir); err != nil {
-		writeNativeStateStopped(appDir, "Ошибка запуска: "+err.Error())
+		writeNativeStateStopped(appDir, "Launch error: "+err.Error())
 		return
 	}
 	// The manager writes the final detailed state; this message is visible if
@@ -2096,74 +1481,6 @@ func configuredPort(appDir string) int {
 
 func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
-}
-
-func writeStatus(text string) {
-	_ = os.MkdirAll(runtimeDirPath, 0700)
-	_ = os.WriteFile(filepath.Join(runtimeDirPath, "status.txt"), []byte(text), 0600)
-}
-
-func loggingEnabledNow() bool {
-	data, err := os.ReadFile(persistentConfigPath)
-	if err != nil {
-		return false
-	}
-	var value struct {
-		LoggingEnabled bool `json:"logging_enabled"`
-	}
-	return json.Unmarshal(data, &value) == nil && value.LoggingEnabled
-}
-
-func openProcessOutput() (*os.File, error) {
-	if loggingEnabledNow() {
-		return os.OpenFile(unifiedLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	}
-	return os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-}
-
-func appendLog(_ string, text string) {
-	if !loggingEnabledNow() {
-		return
-	}
-	f, err := os.OpenFile(unifiedLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), text)
-}
-
-func writeDiagnostic(appDir string) {
-	if !loggingEnabledNow() {
-		return
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "WiFiFiles diagnostic %s\n", version)
-	fmt.Fprintf(&b, "time=%s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(&b, "goos=%s goarch=%s\n", runtime.GOOS, runtime.GOARCH)
-	fmt.Fprintf(&b, "uid=%d euid=%d gid=%d pid=%d\n", os.Getuid(), os.Geteuid(), os.Getgid(), os.Getpid())
-	fmt.Fprintf(&b, "executable=%s\n", os.Args[0])
-	fmt.Fprintf(&b, "runtime=%s\n", appDir)
-	fmt.Fprintf(&b, "config=%s\n", persistentConfigPath)
-	fmt.Fprintf(&b, "ips=%s\n", strings.Join(localIPv4s(), ","))
-	for _, path := range []string{"/mnt/ext1", "/mnt/ext2", "/ebrmain/bin/netagent", "/ebrmain/bin/auto_connect.app", appDir} {
-		st, err := os.Stat(path)
-		if err != nil {
-			fmt.Fprintf(&b, "%s: %v\n", path, err)
-		} else {
-			fmt.Fprintf(&b, "%s: mode=%s size=%d\n", path, st.Mode(), st.Size())
-		}
-	}
-	for _, port := range []int{4445, 8080, 8090, 2121} {
-		conn, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
-		if err != nil {
-			fmt.Fprintf(&b, "port_%d=%v\n", port, err)
-		} else {
-			fmt.Fprintf(&b, "port_%d=open\n", port)
-			_ = conn.Close()
-		}
-	}
-	appendLog(appDir, strings.TrimRight(b.String(), "\n"))
 }
 
 func newApp(cfgPath string) (*App, error) {
@@ -2310,23 +1627,6 @@ func (a *App) configSnapshot() Config {
 	return a.cfg
 }
 
-func (a *App) resetSessions() {
-	a.sessMu.Lock()
-	a.sessions = make(map[string]time.Time)
-	a.sessMu.Unlock()
-}
-
-func (a *App) checkCredentials(username, password string) bool {
-	cfg := a.configSnapshot()
-	wantUser := []byte(cfg.Username)
-	gotUser := []byte(username)
-	userOK := len(wantUser) == len(gotUser) && subtle.ConstantTimeCompare(wantUser, gotUser) == 1
-	gotHash := []byte(passwordHash(cfg.PasswordSalt, password))
-	wantHash := []byte(cfg.PasswordHash)
-	passOK := len(wantHash) == len(gotHash) && subtle.ConstantTimeCompare(wantHash, gotHash) == 1
-	return userOK && passOK
-}
-
 func (a *App) enabledRoot(name string) bool {
 	cfg := a.configSnapshot()
 	switch name {
@@ -2348,23 +1648,6 @@ func (a *App) defaultRoot() string {
 		return "sd"
 	}
 	return "internal"
-}
-
-func passwordHash(salt, password string) string {
-	sum := sha256.Sum256([]byte(salt + "\x00" + password))
-	return hex.EncodeToString(sum[:])
-}
-
-func usesDefaultPassword(cfg Config) bool {
-	return passwordHash(cfg.PasswordSalt, "650wifi") == cfg.PasswordHash
-}
-
-func randomHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 func (a *App) routes() http.Handler {
@@ -2395,32 +1678,6 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func (a *App) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("pbwf_session")
-		if err != nil || !a.validSession(c.Value) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
-		next(w, r)
-	}
-}
-
-func (a *App) validSession(token string) bool {
-	if token == "" {
-		return false
-	}
-	a.sessMu.Lock()
-	defer a.sessMu.Unlock()
-	expiry, ok := a.sessions[token]
-	if !ok || time.Now().After(expiry) {
-		delete(a.sessions, token)
-		return false
-	}
-	a.sessions[token] = time.Now().Add(12 * time.Hour)
-	return true
-}
-
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		_ = a.tmpl.ExecuteTemplate(w, "login", PageData{Version: version})
@@ -2440,7 +1697,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !a.checkCredentials(user, pass) {
 		time.Sleep(400 * time.Millisecond)
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = a.tmpl.ExecuteTemplate(w, "login", PageData{Version: version, Error: "Неверный логин или пароль"})
+		_ = a.tmpl.ExecuteTemplate(w, "login", PageData{Version: version, Error: "invalid username or password"})
 		return
 	}
 	token, err := randomHex(32)
@@ -2477,7 +1734,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	st, err := os.Stat(full)
 	if err != nil || !st.IsDir() {
-		a.renderIndex(w, p, "Папка не найдена", "")
+		a.renderIndex(w, p, "folder not found", "")
 		return
 	}
 	a.renderIndex(w, virtual, "", r.URL.Query().Get("msg"))
@@ -2492,7 +1749,7 @@ func (a *App) renderIndex(w http.ResponseWriter, p, errMsg, msg string) {
 	}
 	list, err := os.ReadDir(full)
 	if err != nil {
-		errMsg = "Не удалось прочитать папку: " + err.Error()
+		errMsg = "failed to read folder: " + err.Error()
 	}
 	entries := make([]Entry, 0, len(list))
 	for _, de := range list {
@@ -2551,9 +1808,9 @@ func breadcrumbItems(virtual string) []Breadcrumb {
 		label := parts[i]
 		if i == 0 {
 			if parts[i] == "internal" {
-				label = "Внутренняя память"
+				label = "internal storage"
 			} else if parts[i] == "sd" {
-				label = "Карта SD"
+				label = "SD card"
 			}
 		}
 		out = append(out, Breadcrumb{Path: path, Label: label})
@@ -2601,354 +1858,17 @@ func (a *App) uploadDestinations(current string) []UploadDestination {
 		}
 	}
 	if a.enabledRoot("internal") {
-		walk(a.roots["internal"], "internal", "Внутренняя память", 0)
+		walk(a.roots["internal"], "internal", "internal storage", 0)
 	}
 	if a.enabledRoot("sd") {
 		if st, err := os.Stat(a.roots["sd"]); err == nil && st.IsDir() {
-			walk(a.roots["sd"], "sd", "Карта SD", 0)
+			walk(a.roots["sd"], "sd", "SD card", 0)
 		}
 	}
 	if current != "" && !seenCurrent {
 		out = append([]UploadDestination{{Path: current, Label: "/" + current, Selected: true}}, out...)
 	}
 	return out
-}
-
-func loadMobileToken(token string) (MobileTokenRecord, error) {
-	var record MobileTokenRecord
-	data, err := os.ReadFile(mobileTokenPath)
-	if err != nil {
-		return record, errors.New("temporary link not found")
-	}
-	if err := json.Unmarshal(data, &record); err != nil {
-		return record, errors.New("temporary link is damaged")
-	}
-	if token == "" || subtle.ConstantTimeCompare([]byte(record.Token), []byte(token)) != 1 {
-		return record, errors.New("temporary link is invalid")
-	}
-	if time.Now().Unix() > record.Expires {
-		_ = os.Remove(mobileTokenPath)
-		_ = os.Remove(mobileReceiptPath)
-		return record, errors.New("temporary link has expired")
-	}
-	record.Mode = normalizeMobileMode(record.Mode)
-	return record, nil
-}
-
-func mobileText(lang, ru, en, fr, de string) string {
-	switch normalizeLanguage(lang) {
-	case "en":
-		return en
-	case "fr":
-		return fr
-	case "de":
-		return de
-	default:
-		return ru
-	}
-}
-
-func mobileTargetLabel(lang, target string) string {
-	parts := strings.Split(strings.Trim(target, "/"), "/")
-	if len(parts) == 0 {
-		return target
-	}
-	if parts[0] == "internal" {
-		parts[0] = mobileText(lang, "Память ридера", "Reader storage", "Mémoire du lecteur", "Reader-Speicher")
-	} else if parts[0] == "sd" {
-		parts[0] = mobileText(lang, "Карта SD", "SD card", "Carte SD", "SD-Karte")
-	}
-	return strings.Join(parts, " / ")
-}
-
-func (a *App) renderMobileLegacy(w http.ResponseWriter, token, target string, uploaded []string, pageErr string) {
-	cfg := a.configSnapshot()
-	lang := cfg.Language
-	title := mobileText(lang, "Передача с телефона по QR-коду", "Phone transfer by QR code", "Transfert depuis un téléphone par code QR", "Übertragung vom Telefon per QR-Code")
-	choose := mobileText(lang, "Выберите книгу или несколько файлов", "Choose a book or several files", "Choisissez un livre ou plusieurs fichiers", "Buch oder mehrere Dateien auswählen")
-	send := mobileText(lang, "Отправить в выбранную папку", "Send to the selected folder", "Envoyer vers le dossier choisi", "In den gewählten Ordner senden")
-	destination := mobileText(lang, "Папка на ридере", "Folder on the reader", "Dossier sur le lecteur", "Ordner auf dem Reader")
-	freeLabel := mobileText(lang, "Свободное место", "Free space", "Espace libre", "Freier Speicher")
-	note := mobileText(lang, "Ссылка действует 20 минут. Файл с совпадающим именем не заменяется: к новому имени добавляется номер.", "The link is valid for 20 minutes. An existing file is never replaced; a number is added to the new filename.", "Le lien reste valide pendant 20 minutes. Un fichier existant n’est jamais remplacé : un numéro est ajouté au nouveau nom.", "Der Link ist 20 Minuten gültig. Vorhandene Dateien werden nicht ersetzt; der neue Dateiname erhält eine Nummer.")
-	done := mobileText(lang, "Передача завершена", "Transfer complete", "Transfert terminé", "Übertragung abgeschlossen")
-	more := mobileText(lang, "Библиотека ридера обновляется. Через несколько секунд книга появится в разделе «Новые». Можно отправить ещё одну книгу.", "The reader library is updating. The book should appear under New in a few seconds. You can send another book.", "La bibliothèque du lecteur est en cours de mise à jour. Le livre devrait apparaître dans « Nouveaux » dans quelques secondes. Vous pouvez envoyer un autre livre.", "Die Bibliothek des Readers wird aktualisiert. Das Buch sollte in wenigen Sekunden unter „Neu“ erscheinen. Sie können ein weiteres Buch senden.")
-	preparing := mobileText(lang, "Подготовка передачи…", "Preparing transfer…", "Préparation du transfert…", "Übertragung wird vorbereitet…")
-	transferring := mobileText(lang, "Передача", "Transferring", "Transfert", "Übertragung")
-	networkError := mobileText(lang, "Не удалось передать файл. Проверьте Wi‑Fi и повторите попытку.", "The file could not be transferred. Check Wi-Fi and try again.", "Le fichier n’a pas pu être transféré. Vérifiez le Wi-Fi et réessayez.", "Die Datei konnte nicht übertragen werden. Prüfen Sie das WLAN und versuchen Sie es erneut.")
-	free := mobileText(lang, "не удалось определить", "unavailable", "indisponible", "nicht verfügbar")
-	if targetDir, _, err := a.resolvePath(target, true); err == nil {
-		free = freeSpaceText(targetDir)
-	}
-
-	fmt.Fprint(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>WiFiFiles</title><style>body{font-family:system-ui,"Segoe UI",sans-serif;margin:0;background:#f2f2f7;color:#111;padding:max(18px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}.wrap{max-width:620px;margin:auto}.card{background:white;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 1px 4px #0002}h1{font-size:30px;line-height:1.15;margin:8px 0 18px}.path{font-weight:700;word-break:break-word;background:#f2f2f7;border-radius:10px;padding:12px}input[type=file]{font-size:18px;width:100%;box-sizing:border-box;padding:14px;border:2px dashed #777;border-radius:12px;background:#fafafa}button{width:100%;font-size:20px;font-weight:700;padding:16px;border:0;border-radius:12px;background:#111;color:white;margin-top:16px}button:disabled{opacity:.55}.ok{background:#e9f8ed;border-left:5px solid #248a3d;padding:14px;border-radius:10px}.err{background:#fff0f0;border-left:5px solid #b00020;padding:14px;border-radius:10px}.muted{color:#555;line-height:1.4}ul{padding-left:22px}.progress{display:none;margin-top:16px}.progress.visible{display:block}progress{width:100%;height:22px}.progress-text{margin-top:7px;font-weight:700}</style></head><body><div class="wrap">`)
-	fmt.Fprintf(w, "<h1>%s</h1>", template.HTMLEscapeString(title))
-	if pageErr != "" {
-		fmt.Fprintf(w, "<div class=\"err\">%s</div>", template.HTMLEscapeString(pageErr))
-	}
-	if len(uploaded) > 0 {
-		fmt.Fprintf(w, "<div class=\"ok\"><strong>%s</strong><ul>", template.HTMLEscapeString(done))
-		for _, name := range uploaded {
-			fmt.Fprintf(w, "<li>%s</li>", template.HTMLEscapeString(name))
-		}
-		fmt.Fprintf(w, "</ul>%s</div>", template.HTMLEscapeString(more))
-	}
-	fmt.Fprintf(w, "<div class=\"card\"><div class=\"muted\">%s</div><div class=\"path\">%s</div><p class=\"muted\"><strong>%s:</strong> %s</p></div>", template.HTMLEscapeString(destination), template.HTMLEscapeString(mobileTargetLabel(lang, target)), template.HTMLEscapeString(freeLabel), template.HTMLEscapeString(free))
-	fmt.Fprintf(w, "<form id=\"mobile-upload-form\" class=\"card\" method=\"post\" enctype=\"multipart/form-data\" action=\"/m/%s/upload\"><label><strong>%s</strong><br><br><input id=\"mobile-files\" type=\"file\" name=\"files\" multiple required></label><button id=\"mobile-send\" type=\"submit\">%s</button><div id=\"mobile-progress\" class=\"progress\"><progress id=\"mobile-progress-bar\" max=\"100\" value=\"0\"></progress><div id=\"mobile-progress-text\" class=\"progress-text\"></div></div></form>", template.HTMLEscapeString(token), template.HTMLEscapeString(choose), template.HTMLEscapeString(send))
-	fmt.Fprintf(w, "<p class=\"muted\">%s</p>", template.HTMLEscapeString(note))
-	fmt.Fprintf(w, `<script>(function(){var form=document.getElementById('mobile-upload-form'),button=document.getElementById('mobile-send'),box=document.getElementById('mobile-progress'),bar=document.getElementById('mobile-progress-bar'),text=document.getElementById('mobile-progress-text');if(!form||!window.XMLHttpRequest)return;form.addEventListener('submit',function(e){e.preventDefault();button.disabled=true;box.className='progress visible';bar.value=0;text.textContent=%s;var xhr=new XMLHttpRequest();xhr.open('POST',form.action,true);xhr.upload.onprogress=function(ev){if(!ev.lengthComputable)return;var pct=Math.max(0,Math.min(100,Math.round(ev.loaded*100/ev.total)));bar.value=pct;text.textContent=%s+' — '+pct+'%%';};xhr.onerror=function(){button.disabled=false;text.textContent=%s;};xhr.onload=function(){if(xhr.status>=200&&xhr.status<300){document.open();document.write(xhr.responseText);document.close();}else{button.disabled=false;text.textContent=xhr.responseText||%s;}};xhr.send(new FormData(form));});})();</script>`, strconv.Quote(preparing), strconv.Quote(transferring), strconv.Quote(networkError), strconv.Quote(networkError))
-	fmt.Fprint(w, `</div></body></html>`)
-}
-
-func (a *App) handleMobileLegacy(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 2 || parts[0] != "m" {
-		http.NotFound(w, r)
-		return
-	}
-	token := parts[1]
-	record, err := loadMobileToken(token)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusGone)
-		return
-	}
-	targetDir, target, err := a.resolvePath(record.Target, true)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if len(parts) == 2 && r.Method == http.MethodGet {
-		a.renderMobileLegacy(w, token, target, nil, "")
-		return
-	}
-	if len(parts) != 3 || parts[2] != "upload" || r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		a.renderMobileLegacy(w, token, target, nil, "Upload error: "+err.Error())
-		return
-	}
-	files := r.MultipartForm.File["files"]
-	if len(files) == 0 {
-		a.renderMobileLegacy(w, token, target, nil, mobileText(a.configSnapshot().Language, "Файл не выбран", "No file selected", "Aucun fichier sélectionné", "Keine Datei ausgewählt"))
-		return
-	}
-	if err := ensureUploadSpace(targetDir, files); err != nil {
-		a.renderMobileLegacy(w, token, target, nil, err.Error())
-		return
-	}
-	uploaded := make([]string, 0, len(files))
-	for _, hdr := range files {
-		name, err := saveUploadAutoRename(targetDir, hdr)
-		if err != nil {
-			a.renderMobileLegacy(w, token, target, uploaded, "Upload error: "+err.Error())
-			return
-		}
-		uploaded = append(uploaded, name)
-		a.scheduleLibraryRefresh(filepath.Join(targetDir, name))
-	}
-	appendLog(runtimeDirPath, fmt.Sprintf("Mobile upload to /%s: %s", target, strings.Join(uploaded, ", ")))
-	a.renderMobileLegacy(w, token, target, uploaded, "")
-}
-
-func saveUploadAutoRename(dir string, hdr *multipart.FileHeader) (string, error) {
-	name, err := safeUploadName(hdr.Filename)
-	if err != nil {
-		return "", err
-	}
-	tmpPath, err := writeMultipartTemp(dir, hdr)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpPath)
-	return commitTempAutoRename(dir, name, tmpPath)
-}
-
-func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
-	full, _, err := a.resolvePath(requestVirtualPath(r), false)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil || st.IsDir() {
-		http.Error(w, "file not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(filepath.Base(full))))
-	http.ServeFile(w, r, full)
-}
-
-func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<30)
-	reader, err := r.MultipartReader()
-	if err != nil {
-		http.Error(w, "upload error: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	type pendingUpload struct {
-		name    string
-		tmpPath string
-	}
-	var pending []pendingUpload
-	defer func() {
-		for _, item := range pending {
-			if item.tmpPath != "" {
-				_ = os.Remove(item.tmpPath)
-			}
-		}
-	}()
-
-	targetVirtual := ""
-	target := ""
-	overwrite := false
-	spaceChecked := false
-	for {
-		part, nextErr := reader.NextPart()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			http.Error(w, "upload error: "+nextErr.Error(), http.StatusBadRequest)
-			return
-		}
-		switch part.FormName() {
-		case "target":
-			value, readErr := readMultipartText(part, 4096)
-			_ = part.Close()
-			if readErr != nil {
-				http.Error(w, "upload error: "+readErr.Error(), http.StatusBadRequest)
-				return
-			}
-			targetVirtual = strings.TrimSpace(value)
-		case "overwrite":
-			value, readErr := readMultipartText(part, 16)
-			_ = part.Close()
-			if readErr != nil {
-				http.Error(w, "upload error: "+readErr.Error(), http.StatusBadRequest)
-				return
-			}
-			overwrite = strings.TrimSpace(value) == "1"
-		case "files":
-			if target == "" {
-				if targetVirtual == "" {
-					targetVirtual = requestVirtualPath(r)
-				}
-				target, targetVirtual, err = a.resolvePath(targetVirtual, true)
-				if err != nil {
-					_ = part.Close()
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			if !spaceChecked {
-				if err := ensureRequestUploadSpace(target, r.ContentLength); err != nil {
-					_ = part.Close()
-					redirectMsg(w, r, targetVirtual, err.Error())
-					return
-				}
-				spaceChecked = true
-			}
-			name, nameErr := safeUploadName(part.FileName())
-			if nameErr != nil {
-				_ = part.Close()
-				http.Error(w, "upload error: "+nameErr.Error(), http.StatusBadRequest)
-				return
-			}
-			tmpPath, _, writeErr := writeStreamTemp(target, part)
-			_ = part.Close()
-			if writeErr != nil {
-				http.Error(w, "upload error: "+writeErr.Error(), http.StatusInternalServerError)
-				return
-			}
-			pending = append(pending, pendingUpload{name: name, tmpPath: tmpPath})
-		default:
-			_ = part.Close()
-		}
-	}
-
-	if len(pending) == 0 {
-		if targetVirtual == "" {
-			targetVirtual = requestVirtualPath(r)
-		}
-		redirectMsg(w, r, targetVirtual, "Файл не выбран")
-		return
-	}
-	if target == "" {
-		target, targetVirtual, err = a.resolvePath(targetVirtual, true)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	seen := make(map[string]struct{}, len(pending))
-	if !overwrite {
-		for _, item := range pending {
-			key := strings.ToLower(item.name)
-			if _, exists := seen[key]; exists {
-				redirectMsg(w, r, targetVirtual, "Один файл выбран несколько раз: "+item.name)
-				return
-			}
-			seen[key] = struct{}{}
-			if _, statErr := os.Stat(filepath.Join(target, item.name)); statErr == nil {
-				redirectMsg(w, r, targetVirtual, "Файл уже существует: "+item.name+". Для замены отметьте соответствующий пункт.")
-				return
-			} else if !errors.Is(statErr, os.ErrNotExist) {
-				http.Error(w, "upload error: "+statErr.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-
-	for i := range pending {
-		item := &pending[i]
-		finalPath := filepath.Join(target, item.name)
-		if err := os.Rename(item.tmpPath, finalPath); err != nil {
-			http.Error(w, "upload error: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		item.tmpPath = ""
-		a.scheduleLibraryRefresh(finalPath)
-	}
-	redirectMsg(w, r, targetVirtual, "Загрузка завершена")
-}
-
-func safeUploadName(filename string) (string, error) {
-	name := filepath.Base(strings.ReplaceAll(filename, "\\", "/"))
-	if name == "." || name == "" || strings.ContainsRune(name, 0) {
-		return "", errors.New("invalid filename")
-	}
-	return name, nil
-}
-
-func saveUpload(dir string, hdr *multipart.FileHeader, overwrite bool) error {
-	name, err := safeUploadName(hdr.Filename)
-	if err != nil {
-		return err
-	}
-	finalPath := filepath.Join(dir, name)
-	if !overwrite {
-		if _, statErr := os.Stat(finalPath); statErr == nil {
-			return os.ErrExist
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return statErr
-		}
-	}
-	tmpPath, err := writeMultipartTemp(dir, hdr)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpPath)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (a *App) handleMkdir(w http.ResponseWriter, r *http.Request) {
@@ -2965,14 +1885,14 @@ func (a *App) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.FormValue("name"))
 	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
 	if name == "." || name == "" || strings.ContainsRune(name, 0) {
-		redirectMsg(w, r, parentV, "Некорректное имя папки")
+		redirectMsg(w, r, parentV, "invalid folder name")
 		return
 	}
 	if err := os.Mkdir(filepath.Join(parent, name), 0755); err != nil {
-		redirectMsg(w, r, parentV, "Не удалось создать папку: "+err.Error())
+		redirectMsg(w, r, parentV, "failed to create folder: "+err.Error())
 		return
 	}
-	redirectMsg(w, r, parentV, "Папка создана")
+	redirectMsg(w, r, parentV, "folder created")
 }
 
 func (a *App) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -2992,10 +1912,10 @@ func (a *App) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.Remove(full); err != nil {
-		redirectMsg(w, r, parentVirtual(cleanV), "Не удалось удалить: "+err.Error())
+		redirectMsg(w, r, parentVirtual(cleanV), "failed to delete: "+err.Error())
 		return
 	}
-	redirectMsg(w, r, parentVirtual(cleanV), "Удалено")
+	redirectMsg(w, r, parentVirtual(cleanV), "deleted")
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -3014,7 +1934,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	if len(username) < 3 || len(username) > 32 || len(password) < 6 || len(password) > 128 {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = a.tmpl.ExecuteTemplate(w, "settings", PageData{Version: version, Username: username, Error: "Логин: 3–32 символа; пароль: 6–128 символов"})
+		_ = a.tmpl.ExecuteTemplate(w, "settings", PageData{Version: version, Username: username, Error: "username: 3-32 chars; password: 6-128 chars"})
 		return
 	}
 	salt, err := randomHex(16)
@@ -3049,804 +1969,6 @@ func (a *App) handleInfo(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "WiFiFiles %s\nHostname: %s\nUID: %d\nPort: %d\nWebDAV: /dav/\nIP: %s\nInternal: %s\nSD: %s\n", version, host, os.Getuid(), port, strings.Join(ips, ", "), pathStatus("/mnt/ext1"), pathStatus("/mnt/ext2"))
 }
 
-func (a *App) resolvePath(virtual string, allowRoot bool) (string, string, error) {
-	virtual = strings.TrimSpace(strings.ReplaceAll(virtual, "\\", "/"))
-	virtual = strings.TrimPrefix(virtual, "/")
-	clean := filepath.ToSlash(filepath.Clean(virtual))
-	if clean == "." || clean == "" {
-		clean = a.defaultRoot()
-	}
-	parts := strings.Split(clean, "/")
-	rootName := parts[0]
-	root, ok := a.roots[rootName]
-	if !ok {
-		return "", "", errors.New("unknown volume")
-	}
-	if !a.enabledRoot(rootName) {
-		return "", "", errors.New("эта память отключена в настройках")
-	}
-	if rootName == "sd" {
-		if st, err := os.Stat(root); err != nil || !st.IsDir() {
-			return "", "", errors.New("карта памяти не найдена")
-		}
-	}
-	rel := ""
-	if len(parts) > 1 {
-		rel = filepath.Join(parts[1:]...)
-	}
-	full := filepath.Clean(filepath.Join(root, rel))
-	rootClean := filepath.Clean(root)
-	if full != rootClean && !strings.HasPrefix(full, rootClean+string(os.PathSeparator)) {
-		return "", "", errors.New("invalid path")
-	}
-	if !allowRoot && full == rootClean {
-		return "", "", errors.New("volume root is protected")
-	}
-	if isProtectedVirtual(clean) {
-		return "", "", errors.New("system path is protected")
-	}
-	return full, clean, nil
-}
-
-var protectedRootNames = map[string]map[string]struct{}{
-	"internal": {
-		"system": {}, "applications": {}, ".wififiles": {},
-		"wififiles.log": {}, "wififiles_preparation.log": {},
-		"system volume information": {}, ".adobe-digital-editions": {}, ".adobe-hidden-files": {},
-	},
-	"sd": {
-		"system volume information": {}, "lost.dir": {}, ".adobe-digital-editions": {}, ".adobe-hidden-files": {},
-	},
-}
-
-func isProtectedVirtual(v string) bool {
-	v = strings.ToLower(strings.Trim(v, "/"))
-	parts := strings.Split(v, "/")
-	if len(parts) < 2 {
-		return false
-	}
-	names, ok := protectedRootNames[parts[0]]
-	if !ok {
-		return false
-	}
-	_, protected := names[parts[1]]
-	return protected
-}
-
-func isHiddenSystemPath(parent, name string) bool {
-	parent = strings.ToLower(strings.Trim(parent, "/"))
-	// Only hide reserved entries at the root of each storage. A user-created
-	// folder with the same name deeper in the tree remains visible.
-	if strings.Contains(parent, "/") {
-		return false
-	}
-	names, ok := protectedRootNames[parent]
-	if !ok {
-		return false
-	}
-	_, hidden := names[strings.ToLower(strings.TrimSpace(name))]
-	return hidden
-}
-
-func parentVirtual(v string) string {
-	v = strings.Trim(v, "/")
-	if v == "internal" || v == "sd" || v == "" {
-		return ""
-	}
-	p := filepath.ToSlash(filepath.Dir(v))
-	if p == "." {
-		return ""
-	}
-	return p
-}
-
-type FTPServer struct {
-	app    *App
-	appDir string
-	port   int
-	ln     *net.TCPListener
-	stopCh chan struct{}
-	wg     sync.WaitGroup
-}
-
-func NewFTPServer(app *App, appDir string, port int) *FTPServer {
-	return &FTPServer{app: app, appDir: appDir, port: port, stopCh: make(chan struct{})}
-}
-
-func (s *FTPServer) Start() error {
-	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", s.port))
-	if err != nil {
-		return err
-	}
-	ln, err := net.ListenTCP("tcp4", addr)
-	if err != nil {
-		return err
-	}
-	s.ln = ln
-	s.wg.Add(1)
-	go s.acceptLoop()
-	return nil
-}
-
-func (s *FTPServer) Stop() {
-	select {
-	case <-s.stopCh:
-	default:
-		close(s.stopCh)
-	}
-	if s.ln != nil {
-		_ = s.ln.Close()
-	}
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
-}
-
-func (s *FTPServer) acceptLoop() {
-	defer s.wg.Done()
-	for {
-		conn, err := s.ln.AcceptTCP()
-		if err != nil {
-			select {
-			case <-s.stopCh:
-				return
-			default:
-				appendLog(s.appDir, "ftp accept: "+err.Error())
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-		}
-		_ = conn.SetKeepAlive(true)
-		_ = conn.SetKeepAlivePeriod(60 * time.Second)
-		s.wg.Add(1)
-		go func(c *net.TCPConn) {
-			defer s.wg.Done()
-			defer c.Close()
-			(&ftpSession{server: s, conn: c, rw: bufio.NewReadWriter(bufio.NewReaderSize(c, 16*1024), bufio.NewWriterSize(c, 16*1024)), cwd: "/"}).run()
-		}(conn)
-	}
-}
-
-type ftpSession struct {
-	server     *FTPServer
-	conn       *net.TCPConn
-	rw         *bufio.ReadWriter
-	username   string
-	authed     bool
-	cwd        string
-	pasv       *net.TCPListener
-	renameFrom string
-	rest       int64
-}
-
-func (s *ftpSession) run() {
-	s.reply(220, "WiFiFiles FTP %s ready", version)
-	for {
-		_ = s.conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
-		line, err := s.rw.ReadString('\n')
-		if err != nil {
-			return
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			continue
-		}
-		cmd, arg, _ := strings.Cut(line, " ")
-		cmd = strings.ToUpper(strings.TrimSpace(cmd))
-		arg = strings.TrimSpace(arg)
-		if cmd == "QUIT" {
-			s.reply(221, "До свидания")
-			return
-		}
-		if !s.authed && cmd != "USER" && cmd != "PASS" && cmd != "SYST" && cmd != "FEAT" && cmd != "OPTS" && cmd != "NOOP" && cmd != "CLNT" && cmd != "AUTH" {
-			s.reply(530, "Сначала выполните вход")
-			continue
-		}
-		if !s.handle(cmd, arg) {
-			return
-		}
-	}
-}
-
-func (s *ftpSession) handle(cmd, arg string) bool {
-	switch cmd {
-	case "USER":
-		s.username = arg
-		s.authed = false
-		s.reply(331, "Введите пароль")
-	case "PASS":
-		if s.server.app.checkCredentials(s.username, arg) {
-			s.authed = true
-			s.reply(230, "Вход выполнен")
-		} else {
-			time.Sleep(350 * time.Millisecond)
-			s.reply(530, "Неверный логин или пароль")
-		}
-	case "SYST":
-		s.reply(215, "UNIX Type: L8")
-	case "FEAT":
-		s.multiline(211, []string{"Features:", " UTF8", " EPSV", " PASV", " SIZE", " MDTM", " REST STREAM", " MLST type*;size*;modify*;", " MLSD", "End"})
-	case "OPTS":
-		if strings.EqualFold(arg, "UTF8 ON") {
-			s.reply(200, "UTF8 включён")
-		} else {
-			s.reply(200, "OK")
-		}
-	case "CLNT", "NOOP":
-		s.reply(200, "OK")
-	case "AUTH":
-		s.reply(502, "TLS не поддерживается; используйте только доверенную локальную сеть")
-	case "PBSZ", "PROT":
-		s.reply(502, "Команда не поддерживается")
-	case "TYPE":
-		s.reply(200, "Тип установлен")
-	case "MODE":
-		if strings.EqualFold(arg, "S") {
-			s.reply(200, "Режим S")
-		} else {
-			s.reply(504, "Поддерживается только режим S")
-		}
-	case "STRU":
-		if strings.EqualFold(arg, "F") {
-			s.reply(200, "Структура F")
-		} else {
-			s.reply(504, "Поддерживается только структура F")
-		}
-	case "PWD", "XPWD":
-		s.reply(257, "%q is current directory", s.cwd)
-	case "CWD", "XCWD":
-		s.changeDir(arg)
-	case "CDUP":
-		s.changeDir("..")
-	case "PASV":
-		s.enterPassive(false)
-	case "EPSV":
-		s.enterPassive(true)
-	case "PORT", "EPRT":
-		s.reply(502, "Активный FTP не поддерживается; используйте пассивный режим")
-	case "LIST":
-		s.sendList(arg, false, false)
-	case "NLST":
-		s.sendList(arg, true, false)
-	case "MLSD":
-		s.sendList(arg, false, true)
-	case "MLST":
-		s.sendMLST(arg)
-	case "RETR":
-		s.retrieve(arg)
-	case "STOR":
-		s.store(arg, false)
-	case "APPE":
-		s.store(arg, true)
-	case "REST":
-		n, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil || n < 0 {
-			s.reply(501, "Некорректная позиция")
-		} else {
-			s.rest = n
-			s.reply(350, "Позиция сохранена")
-		}
-	case "SIZE":
-		s.size(arg)
-	case "MDTM":
-		s.mdtm(arg)
-	case "DELE":
-		s.deleteFile(arg)
-	case "MKD", "XMKD":
-		s.makeDir(arg)
-	case "RMD", "XRMD":
-		s.removeDir(arg)
-	case "RNFR":
-		s.renameFromCmd(arg)
-	case "RNTO":
-		s.renameToCmd(arg)
-	case "STAT":
-		if arg == "" {
-			s.reply(211, "WiFiFiles FTP работает; cwd=%s", s.cwd)
-		} else {
-			s.reply(502, "STAT для пути не поддерживается")
-		}
-	case "ABOR":
-		s.closePassive()
-		s.reply(226, "Передача остановлена")
-	case "SITE", "ALLO", "LANG":
-		s.reply(200, "OK")
-	default:
-		s.reply(502, "Команда %s не поддерживается", cmd)
-	}
-	return true
-}
-
-func (s *ftpSession) reply(code int, format string, args ...interface{}) {
-	_, _ = fmt.Fprintf(s.rw, "%d %s\r\n", code, fmt.Sprintf(format, args...))
-	_ = s.rw.Flush()
-}
-
-func (s *ftpSession) multiline(code int, lines []string) {
-	if len(lines) == 0 {
-		s.reply(code, "")
-		return
-	}
-	_, _ = fmt.Fprintf(s.rw, "%d-%s\r\n", code, lines[0])
-	for _, line := range lines[1 : len(lines)-1] {
-		_, _ = fmt.Fprintf(s.rw, "%s\r\n", line)
-	}
-	_, _ = fmt.Fprintf(s.rw, "%d %s\r\n", code, lines[len(lines)-1])
-	_ = s.rw.Flush()
-}
-
-func (s *ftpSession) virtualPath(arg string) string {
-	arg = strings.TrimSpace(strings.ReplaceAll(arg, "\\", "/"))
-	if arg == "" {
-		return s.cwd
-	}
-	if strings.HasPrefix(arg, "/") {
-		return pathpkg.Clean(arg)
-	}
-	return pathpkg.Clean(pathpkg.Join(s.cwd, arg))
-}
-
-func (s *ftpSession) resolve(arg string, allowRoot bool) (string, string, error) {
-	v := s.virtualPath(arg)
-	if v == "/" || v == "." {
-		if allowRoot {
-			return "", "/", nil
-		}
-		return "", "", errors.New("корень защищён")
-	}
-	clean := strings.TrimPrefix(v, "/")
-	full, virtual, err := s.server.app.resolvePath(clean, allowRoot)
-	if err != nil {
-		return "", "", err
-	}
-	return full, "/" + virtual, nil
-}
-
-func (s *ftpSession) changeDir(arg string) {
-	full, virtual, err := s.resolve(arg, true)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	if virtual == "/" {
-		s.cwd = "/"
-		s.reply(250, "Каталог изменён")
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil || !st.IsDir() {
-		s.reply(550, "Каталог не найден")
-		return
-	}
-	s.cwd = virtual
-	s.reply(250, "Каталог изменён")
-}
-
-func (s *ftpSession) enterPassive(epsv bool) {
-	s.closePassive()
-	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		s.reply(425, "Не удалось открыть пассивный порт")
-		return
-	}
-	s.pasv = ln
-	port := ln.Addr().(*net.TCPAddr).Port
-	if epsv {
-		s.reply(229, "Entering Extended Passive Mode (|||%d|)", port)
-		return
-	}
-	ip := s.conn.LocalAddr().(*net.TCPAddr).IP.To4()
-	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() {
-		ips := localIPv4s()
-		if len(ips) > 0 {
-			ip = net.ParseIP(ips[0]).To4()
-		}
-	}
-	if ip == nil {
-		ip = net.IPv4(127, 0, 0, 1)
-	}
-	s.reply(227, "Entering Passive Mode (%d,%d,%d,%d,%d,%d)", ip[0], ip[1], ip[2], ip[3], port/256, port%256)
-}
-
-func (s *ftpSession) closePassive() {
-	if s.pasv != nil {
-		_ = s.pasv.Close()
-		s.pasv = nil
-	}
-}
-
-func (s *ftpSession) acceptData() (net.Conn, error) {
-	if s.pasv == nil {
-		return nil, errors.New("сначала включите пассивный режим")
-	}
-	ln := s.pasv
-	s.pasv = nil
-	_ = ln.SetDeadline(time.Now().Add(30 * time.Second))
-	conn, err := ln.Accept()
-	_ = ln.Close()
-	if err != nil {
-		return nil, err
-	}
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
-	return conn, nil
-}
-
-func stripListOptions(arg string) string {
-	fields := strings.Fields(arg)
-	for len(fields) > 0 && strings.HasPrefix(fields[0], "-") {
-		fields = fields[1:]
-	}
-	return strings.Join(fields, " ")
-}
-
-type ftpListItem struct {
-	name string
-	info os.FileInfo
-}
-
-func (s *ftpSession) listItems(arg string) ([]ftpListItem, error) {
-	arg = stripListOptions(arg)
-	full, virtual, err := s.resolve(arg, true)
-	if err != nil {
-		return nil, err
-	}
-	if virtual == "/" {
-		var out []ftpListItem
-		for _, name := range []string{"internal", "sd"} {
-			if !s.server.app.enabledRoot(name) {
-				continue
-			}
-			st, err := os.Stat(s.server.app.roots[name])
-			if err == nil && st.IsDir() {
-				out = append(out, ftpListItem{name: name, info: st})
-			}
-		}
-		return out, nil
-	}
-	st, err := os.Stat(full)
-	if err != nil {
-		return nil, err
-	}
-	if !st.IsDir() {
-		return []ftpListItem{{name: filepath.Base(full), info: st}}, nil
-	}
-	entries, err := os.ReadDir(full)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ftpListItem, 0, len(entries))
-	parent := strings.TrimPrefix(virtual, "/")
-	for _, de := range entries {
-		if isHiddenSystemPath(parent, de.Name()) {
-			continue
-		}
-		info, err := de.Info()
-		if err != nil {
-			continue
-		}
-		out = append(out, ftpListItem{name: de.Name(), info: info})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].info.IsDir() != out[j].info.IsDir() {
-			return out[i].info.IsDir()
-		}
-		return strings.ToLower(out[i].name) < strings.ToLower(out[j].name)
-	})
-	return out, nil
-}
-
-func (s *ftpSession) sendList(arg string, namesOnly, machine bool) {
-	items, err := s.listItems(arg)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	data, err := s.acceptData()
-	if err != nil {
-		s.reply(425, "%s", err.Error())
-		return
-	}
-	s.reply(150, "Открываю соединение данных")
-	bw := bufio.NewWriterSize(data, 16*1024)
-	for _, item := range items {
-		if namesOnly {
-			_, _ = fmt.Fprintf(bw, "%s\r\n", item.name)
-		} else if machine {
-			typeName := "file"
-			if item.info.IsDir() {
-				typeName = "dir"
-			}
-			_, _ = fmt.Fprintf(bw, "type=%s;size=%d;modify=%s; %s\r\n", typeName, item.info.Size(), item.info.ModTime().UTC().Format("20060102150405"), item.name)
-		} else {
-			mode := item.info.Mode().String()
-			_, _ = fmt.Fprintf(bw, "%s 1 pocketbook pocketbook %12d %s %s\r\n", mode, item.info.Size(), item.info.ModTime().Format("Jan _2 15:04"), item.name)
-		}
-	}
-	_ = bw.Flush()
-	_ = data.Close()
-	s.reply(226, "Передача завершена")
-}
-
-func (s *ftpSession) sendMLST(arg string) {
-	full, virtual, err := s.resolve(arg, true)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	if virtual == "/" {
-		s.multiline(250, []string{"Listing", " type=dir;size=0;modify=" + time.Now().UTC().Format("20060102150405") + "; /", "End"})
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil {
-		s.reply(550, "Не найдено")
-		return
-	}
-	typeName := "file"
-	if st.IsDir() {
-		typeName = "dir"
-	}
-	s.multiline(250, []string{"Listing", fmt.Sprintf(" type=%s;size=%d;modify=%s; %s", typeName, st.Size(), st.ModTime().UTC().Format("20060102150405"), pathpkg.Base(virtual)), "End"})
-}
-
-func (s *ftpSession) retrieve(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	f, err := os.Open(full)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil || st.IsDir() {
-		s.reply(550, "Это не файл")
-		return
-	}
-	if s.rest > 0 {
-		_, _ = f.Seek(s.rest, io.SeekStart)
-		s.rest = 0
-	}
-	data, err := s.acceptData()
-	if err != nil {
-		s.reply(425, "%s", err.Error())
-		return
-	}
-	s.reply(150, "Открываю соединение данных (%d байт)", st.Size())
-	_, copyErr := io.Copy(data, f)
-	_ = data.Close()
-	if copyErr != nil {
-		s.reply(426, "Передача прервана: %s", copyErr.Error())
-		return
-	}
-	s.reply(226, "Передача завершена")
-}
-
-func (s *ftpSession) store(arg string, appendMode bool) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	resumeOffset := s.rest
-	s.rest = 0
-
-	// A regular STOR is written to a temporary file and renamed only after a
-	// successful fsync. APPE and REST keep their standard in-place semantics.
-	atomicWrite := !appendMode && resumeOffset == 0
-	writePath := full
-	var tmpPath string
-	if atomicWrite {
-		tmp, createErr := os.CreateTemp(filepath.Dir(full), ".wififiles-ftp-*.part")
-		if createErr != nil {
-			s.reply(550, "%s", createErr.Error())
-			return
-		}
-		writePath = tmp.Name()
-		tmpPath = writePath
-		chmodBestEffort(tmpPath, 0644)
-		_ = tmp.Close()
-		defer os.Remove(tmpPath)
-	}
-
-	flags := os.O_CREATE | os.O_WRONLY
-	if appendMode {
-		flags |= os.O_APPEND
-	} else if resumeOffset == 0 {
-		flags |= os.O_TRUNC
-	}
-	f, err := os.OpenFile(writePath, flags, 0644)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	if resumeOffset > 0 {
-		if _, err := f.Seek(resumeOffset, io.SeekStart); err != nil {
-			_ = f.Close()
-			s.reply(550, "%s", err.Error())
-			return
-		}
-	}
-	data, err := s.acceptData()
-	if err != nil {
-		_ = f.Close()
-		s.reply(425, "%s", err.Error())
-		return
-	}
-	s.reply(150, "Открываю соединение данных")
-	_, copyErr := io.Copy(f, data)
-	_ = data.Close()
-	syncErr := f.Sync()
-	closeErr := f.Close()
-	if copyErr != nil {
-		s.reply(426, "Передача прервана: %s", copyErr.Error())
-		return
-	}
-	if syncErr != nil {
-		s.reply(451, "Ошибка записи: %s", syncErr.Error())
-		return
-	}
-	if closeErr != nil {
-		s.reply(451, "Ошибка закрытия файла: %s", closeErr.Error())
-		return
-	}
-	if atomicWrite {
-		if err := os.Rename(tmpPath, full); err != nil {
-			s.reply(451, "Ошибка завершения записи: %s", err.Error())
-			return
-		}
-	}
-	s.server.app.scheduleLibraryRefresh(full)
-	s.reply(226, "Файл сохранён")
-}
-
-func (s *ftpSession) size(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil || st.IsDir() {
-		s.reply(550, "Файл не найден")
-		return
-	}
-	s.reply(213, "%d", st.Size())
-}
-
-func (s *ftpSession) mdtm(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil {
-		s.reply(550, "Не найдено")
-		return
-	}
-	s.reply(213, "%s", st.ModTime().UTC().Format("20060102150405"))
-}
-
-func (s *ftpSession) deleteFile(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil || st.IsDir() {
-		s.reply(550, "Файл не найден")
-		return
-	}
-	if err := os.Remove(full); err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	s.reply(250, "Файл удалён")
-}
-
-func (s *ftpSession) makeDir(arg string) {
-	full, virtual, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	if err := os.Mkdir(full, 0755); err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	s.reply(257, "%q created", virtual)
-}
-
-func (s *ftpSession) removeDir(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	st, err := os.Stat(full)
-	if err != nil || !st.IsDir() {
-		s.reply(550, "Каталог не найден")
-		return
-	}
-	if err := os.Remove(full); err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	s.reply(250, "Каталог удалён")
-}
-
-func (s *ftpSession) renameFromCmd(arg string) {
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	if _, err := os.Stat(full); err != nil {
-		s.reply(550, "Не найдено")
-		return
-	}
-	s.renameFrom = full
-	s.reply(350, "Укажите новое имя")
-}
-
-func (s *ftpSession) renameToCmd(arg string) {
-	if s.renameFrom == "" {
-		s.reply(503, "Сначала RNFR")
-		return
-	}
-	full, _, err := s.resolve(arg, false)
-	if err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	from := s.renameFrom
-	s.renameFrom = ""
-	if err := os.Rename(from, full); err != nil {
-		s.reply(550, "%s", err.Error())
-		return
-	}
-	s.reply(250, "Переименовано")
-}
-
-func encodeVirtualPath(v string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(v))
-}
-
-func requestVirtualPath(r *http.Request) string {
-	if key := strings.TrimSpace(r.URL.Query().Get("k")); key != "" {
-		if decoded, err := base64.RawURLEncoding.DecodeString(key); err == nil {
-			return string(decoded)
-		}
-	}
-	// Compatibility with 0.2.0/0.2.1 links. html/template could escape
-	// the percent sign again, leaving values such as internal%2FBooks
-	// after net/http had already decoded the query once.
-	v := r.URL.Query().Get("p")
-	for i := 0; i < 3 && strings.Contains(v, "%"); i++ {
-		decoded, err := url.QueryUnescape(v)
-		if err != nil || decoded == v {
-			break
-		}
-		v = decoded
-	}
-	return v
-}
-
-func redirectMsg(w http.ResponseWriter, r *http.Request, p, msg string) {
-	http.Redirect(w, r, "/?k="+encodeVirtualPath(p)+"&msg="+url.QueryEscape(msg), http.StatusSeeOther)
-}
-
 func humanSize(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -3858,49 +1980,6 @@ func humanSize(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-func localIPv4s() []string {
-	ifaces, _ := net.Interfaces()
-	var out []string
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip4 := ip.To4(); ip4 != nil {
-				out = append(out, ip4.String())
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-func pathStatus(p string) string {
-	st, err := os.Stat(p)
-	if err != nil {
-		return "недоступна (" + err.Error() + ")"
-	}
-	if !st.IsDir() {
-		return "это не папка"
-	}
-	f, err := os.CreateTemp(p, ".pbwf-test-")
-	if err != nil {
-		return "только чтение (" + err.Error() + ")"
-	}
-	name := f.Name()
-	_ = f.Close()
-	_ = os.Remove(name)
-	return "чтение и запись"
 }
 
 func (a *App) keepNetworkAlive() {

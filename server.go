@@ -72,9 +72,10 @@ type Config struct {
 	LoggingEnabled bool   `json:"logging_enabled"`
 	Language       string `json:"language,omitempty"`
 
-	InternalEnabled bool   `json:"internal_enabled"`
-	SDEnabled       bool   `json:"sd_enabled"`
-	DefaultTarget   string `json:"default_target,omitempty"`
+	InternalEnabled bool     `json:"internal_enabled"`
+	SDEnabled       bool     `json:"sd_enabled"`
+	DefaultTarget   string   `json:"default_target,omitempty"`
+	RecentTargets   []string `json:"recent_targets,omitempty"`
 }
 
 type App struct {
@@ -923,6 +924,12 @@ func writeNativeState(sm *ServiceManager, message string) {
 	fmt.Fprintf(&b, "uid=%d\n", os.Getuid())
 	fmt.Fprintf(&b, "smb_available=1\n")
 	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
+	for i, recent := range cfg.RecentTargets {
+		if i >= maxRecentTargets {
+			break
+		}
+		fmt.Fprintf(&b, "recent%d=%s\n", i+1, cleanINIValue(recent))
+	}
 	freeInternal := "—"
 	freeSD := "—"
 	if free, err := availableBytes(sm.app.roots["internal"]); err == nil {
@@ -963,6 +970,12 @@ func writeNativeStateStopped(appDir, message string) {
 	fmt.Fprintf(&b, "internal_enabled=%d\nsd_enabled=%d\nlogging_enabled=%d\n", bool01(cfg.InternalEnabled), bool01(cfg.SDEnabled), bool01(cfg.LoggingEnabled))
 	fmt.Fprintf(&b, "username=%s\nlanguage=%s\npassword_is_default=%d\nuid=%d\nsmb_available=1\n", cleanINIValue(cfg.Username), cleanINIValue(cfg.Language), bool01(usesDefaultPassword(cfg)), os.Getuid())
 	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
+	for i, recent := range cfg.RecentTargets {
+		if i >= maxRecentTargets {
+			break
+		}
+		fmt.Fprintf(&b, "recent%d=%s\n", i+1, cleanINIValue(recent))
+	}
 	freeInternal := "—"
 	freeSD := "—"
 	if free, err := availableBytes(app.roots["internal"]); err == nil {

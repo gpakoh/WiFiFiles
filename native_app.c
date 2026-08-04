@@ -209,6 +209,7 @@ struct app_state {
     int password_is_default;
     int uid;
     char default_target[256];
+    char recent_targets[4][256];
     char free_internal[32];
     char free_sd[32];
     char message[192];
@@ -739,6 +740,10 @@ static int instruction_page = 0;
 #define MAIN_START 15
 #define STORAGE_BACK 2
 #define STORAGE_DEFAULT 3
+#define STORAGE_RECENT1 4
+#define STORAGE_RECENT2 5
+#define STORAGE_RECENT3 6
+#define STORAGE_RECENT4 7
 #define FOLDER_BACK 10
 #define FOLDER_UP 11
 #define FOLDER_PREV 12
@@ -973,6 +978,10 @@ static void load_state(void) {
     st.password_is_default = ini_int(data, "password_is_default", 1);
     st.uid = ini_int(data, "uid", 101);
     ini_value(data, "default_target", st.default_target, sizeof(st.default_target));
+    ini_value(data, "recent1", st.recent_targets[0], sizeof(st.recent_targets[0]));
+    ini_value(data, "recent2", st.recent_targets[1], sizeof(st.recent_targets[1]));
+    ini_value(data, "recent3", st.recent_targets[2], sizeof(st.recent_targets[2]));
+    ini_value(data, "recent4", st.recent_targets[3], sizeof(st.recent_targets[3]));
     ini_value(data, "free_internal", st.free_internal, sizeof(st.free_internal));
     ini_value(data, "free_sd", st.free_sd, sizeof(st.free_sd));
     ini_value(data, "message", v, sizeof(v)); scopy(st.message, sizeof(st.message), v);
@@ -1647,6 +1656,23 @@ static void draw_storage_picker(void) {
         scat(default_label, sizeof(default_label), path_label);
         draw_row(STORAGE_DEFAULT, y + 140, default_label, ">", 0);
     }
+    {
+        int i, rows = 0;
+        for (i = 0; i < 4; i++) if (st.recent_targets[i][0]) rows = i + 1;
+        if (rows > 0) {
+            char recent_label[320];
+            draw_text(font_help, 34, y + 192, screen_w - 68, 24,
+                L("Недавние: ", "Recent: ", "Récents : ", "Zuletzt: "), ALIGN_LEFT | VALIGN_MIDDLE);
+            for (i = 0; i < rows; i++) {
+                char path_label[280];
+                virtual_path_label(st.recent_targets[i], path_label, sizeof(path_label));
+                recent_label[0] = 0;
+                scat(recent_label, sizeof(recent_label), "· ");
+                scat(recent_label, sizeof(recent_label), path_label);
+                draw_row(STORAGE_RECENT1 + i, y + 214 + i * 70, recent_label, ">", 0);
+            }
+        }
+    }
     draw_action(STORAGE_BACK, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
     finish_screen_update();
 }
@@ -2089,6 +2115,9 @@ static void activate_current(int idx) {
         } else if (idx == STORAGE_DEFAULT && st.default_target[0]) {
             scopy(folder_current, sizeof(folder_current), st.default_target);
             screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+        } else if (idx >= STORAGE_RECENT1 && idx <= STORAGE_RECENT4 && st.recent_targets[idx - STORAGE_RECENT1][0]) {
+            scopy(folder_current, sizeof(folder_current), st.recent_targets[idx - STORAGE_RECENT1]);
+            screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
         } else if (idx == STORAGE_BACK) { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
         return;
     }
@@ -2172,6 +2201,10 @@ static int current_item_from_y(int x, int y) {
         if (y >= 220 && y < 265) return 0;
         if (y >= 290 && y < 335) return 1;
         if (st.default_target[0] && y >= 360 && y < 405) return STORAGE_DEFAULT;
+        if (y >= 434 && y < 479) return STORAGE_RECENT1;
+        if (y >= 504 && y < 549) return STORAGE_RECENT2;
+        if (y >= 574 && y < 619) return STORAGE_RECENT3;
+        if (y >= 644 && y < 689) return STORAGE_RECENT4;
         if (y >= screen_h - 72 && x >= 18 && x < 238) return STORAGE_BACK;
         return -1;
     }
@@ -2237,6 +2270,7 @@ static int selection_valid(int idx) {
         if (idx == 0) return st.internal_enabled;
         if (idx == 1) return st.sd_enabled;
         if (idx == STORAGE_DEFAULT) return st.default_target[0] != 0;
+        if (idx >= STORAGE_RECENT1 && idx <= STORAGE_RECENT4) return st.recent_targets[idx - STORAGE_RECENT1][0] != 0;
         return idx == STORAGE_BACK;
     }
     if (screen_mode == MODE_FOLDER_PICKER) {

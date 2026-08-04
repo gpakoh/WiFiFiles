@@ -235,6 +235,43 @@ func mobileJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+const maxRecentTargets = 4
+
+func (a *App) rememberTarget(virtual string) {
+	virtual = strings.TrimSpace(strings.ReplaceAll(virtual, "\\", "/"))
+	if virtual == "" {
+		return
+	}
+	a.cfgMu.Lock()
+	updated := []string{virtual}
+	for _, prev := range a.cfg.RecentTargets {
+		if prev == virtual {
+			continue
+		}
+		updated = append(updated, prev)
+		if len(updated) >= maxRecentTargets {
+			break
+		}
+	}
+	changed := len(updated) != len(a.cfg.RecentTargets)
+	if !changed {
+		for i := range updated {
+			if updated[i] != a.cfg.RecentTargets[i] {
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		a.cfg.RecentTargets = updated
+		a.cfg.ConfigVersion = 7
+	}
+	a.cfgMu.Unlock()
+	if changed {
+		_ = a.saveConfig()
+	}
+}
+
 func mobileRedirect(w http.ResponseWriter, r *http.Request, token, key, message string) {
 	q := url.Values{}
 	q.Set(key, message)
@@ -284,7 +321,7 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		}
 		mobileJSON(w, http.StatusOK, map[string]any{"entries": entries, "free_space": freeSpaceText(targetDir), "mode": record.Mode})
 	case action == "upload" && r.Method == http.MethodPost:
-		a.handleMobileUploadOne(w, r, token, targetDir)
+		a.handleMobileUploadOne(w, r, token, targetDir, target)
 	case action == "finish" && r.Method == http.MethodPost:
 		count := a.flushMobilePending(token)
 		mobileJSON(w, http.StatusOK, map[string]any{"ok": true, "indexed": count})
@@ -393,7 +430,7 @@ func readMultipartText(part io.Reader, max int64) (string, error) {
 	return string(data), nil
 }
 
-func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, token, targetDir string) {
+func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, token, targetDir, virtual string) {
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
 	if err := ensureRequestUploadSpace(targetDir, r.ContentLength); err != nil {
 		mobileJSON(w, 507, map[string]string{"error": err.Error()})
@@ -460,14 +497,15 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 	result := MobileUploadResult{Status: status, Original: name, StoredAs: stored, Message: message}
 	a.saveMobileReceipt(token, uploadID, result)
 	a.addMobilePending(token, filepath.Join(targetDir, stored))
+	a.rememberTarget(virtual)
 	appendLog(runtimeDirPath, "Mobile QR raw upload: "+stored)
 	mobileJSON(w, http.StatusOK, result)
 }
 
-func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, token, targetDir string) {
+func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, token, targetDir, virtual string) {
 	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	if strings.TrimSpace(r.URL.Query().Get("name")) != "" && !strings.HasPrefix(contentType, "multipart/form-data") {
-		a.handleMobileRawUpload(w, r, token, targetDir)
+		a.handleMobileRawUpload(w, r, token, targetDir, virtual)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
@@ -601,6 +639,7 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 	result := MobileUploadResult{Status: status, Original: name, StoredAs: stored, Message: message}
 	a.saveMobileReceipt(token, uploadID, result)
 	a.addMobilePending(token, filepath.Join(targetDir, stored))
+	a.rememberTarget(virtual)
 	appendLog(runtimeDirPath, "Mobile QR upload: "+stored)
 	mobileJSON(w, http.StatusOK, result)
 }

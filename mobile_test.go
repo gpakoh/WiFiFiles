@@ -587,3 +587,52 @@ func TestMobileUploadEnforcesPerTokenFileLimit(t *testing.T) {
 		t.Fatalf("files on disk=%d want=%d", len(entries), maxMobileFilesPerToken)
 	}
 }
+
+func TestMobileUploadRecordsRecentTargets(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	rr, result := mobileUploadRequest(t, app, token, "id-1", "book1.epub", "contents")
+	if rr.Code != http.StatusOK || result.Status != "uploaded" {
+		t.Fatalf("upload: status=%d result=%+v", rr.Code, result)
+	}
+	app.cfgMu.RLock()
+	recent := append([]string(nil), app.cfg.RecentTargets...)
+	app.cfgMu.RUnlock()
+	if len(recent) != 1 || recent[0] != "internal/Books" {
+		t.Fatalf("recent targets=%v want=[internal/Books]", recent)
+	}
+	rr, result = mobileUploadRequest(t, app, token, "id-2", "book2.epub", "contents")
+	if rr.Code != http.StatusOK || result.Status != "uploaded" {
+		t.Fatalf("second upload: status=%d result=%+v", rr.Code, result)
+	}
+	app.cfgMu.RLock()
+	recent = append([]string(nil), app.cfg.RecentTargets...)
+	app.cfgMu.RUnlock()
+	if len(recent) != 1 || recent[0] != "internal/Books" {
+		t.Fatalf("recent after dedup=%v want=[internal/Books]", recent)
+	}
+}
+
+func TestRememberTargetDedupAndCap(t *testing.T) {
+	app, err := newApp(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.rememberTarget("internal/Books")
+	app.rememberTarget("sd/Books")
+	app.rememberTarget("internal/Books")
+	app.rememberTarget("internal/New")
+	app.rememberTarget("sd/Other")
+	app.rememberTarget("internal/Last")
+	app.cfgMu.RLock()
+	recent := append([]string(nil), app.cfg.RecentTargets...)
+	app.cfgMu.RUnlock()
+	want := []string{"internal/Last", "sd/Other", "internal/New", "internal/Books"}
+	if len(recent) != len(want) {
+		t.Fatalf("recent=%v want=%v", recent, want)
+	}
+	for i := range want {
+		if recent[i] != want[i] {
+			t.Fatalf("recent=%v want=%v", recent, want)
+		}
+	}
+}

@@ -1057,3 +1057,205 @@ func TestAddMobileTokenKeepsLiveAndCaps(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleMobileListAction(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "safe")
+	if err := os.WriteFile(filepath.Join(books, "one.epub"), []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/list", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload struct {
+		Entries   []mobileFolderEntry `json:"entries"`
+		FreeSpace string              `json:"free_space"`
+		Mode      string              `json:"mode"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("list json: %v body=%s", err, rr.Body.String())
+	}
+	if payload.Mode != "safe" || len(payload.Entries) != 1 || payload.Entries[0].Name != "one.epub" || payload.FreeSpace == "" {
+		t.Fatalf("list payload=%+v", payload)
+	}
+}
+
+func TestHandleMobileFragmentFailsOnMissingTarget(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	if err := writeMobileTokens([]MobileTokenRecord{{Token: token, Target: "internal/Missing", Mode: "safe", Expires: time.Now().Add(time.Minute).Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/fragment", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("fragment missing dir = %d", rr.Code)
+	}
+}
+
+func TestHandleMobileDeleteAndRenameNegatives(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "safe")
+	if err := os.WriteFile(filepath.Join(books, "a.epub"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(books, "b.epub"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(path string, form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := post("/m/"+token+"/delete", url.Values{"name": {"a.epub"}})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("safe delete = %d", rr.Code)
+	}
+	rr = post("/m/"+token+"/rename", url.Values{"old": {"a.epub"}, "new": {"b.epub"}})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("safe rename = %d", rr.Code)
+	}
+
+	if err := writeMobileTokens([]MobileTokenRecord{{Token: token, Target: "internal/Books", Mode: "edit", Expires: time.Now().Add(time.Minute).Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr = post("/m/"+token+"/delete", url.Values{"name": {"../escape"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("delete bad name = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("/m/"+token+"/delete", url.Values{"name": {"missing.epub"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("delete missing = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("/m/"+token+"/rename", url.Values{"old": {"missing.epub"}, "new": {"new.epub"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("rename missing old = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("/m/"+token+"/rename", url.Values{"old": {"a.epub"}, "new": {"b.epub"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("rename onto existing = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+	if data, err := os.ReadFile(filepath.Join(books, "a.epub")); err != nil || string(data) != "a" {
+		t.Fatalf("a.epub damaged: %q %v", data, err)
+	}
+}
+
+func TestMobileDownloadAllEmptyAndMissing(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/download-all", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("download-all empty = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	if err := os.RemoveAll(books); err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/download-all", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("download-all missing dir = %d", rr.Code)
+	}
+}
+
+func TestMobileUploadMultipartNegativeBranches(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+
+	post := func(body io.Reader, contentType string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload", body)
+		req.Header.Set("Content-Type", contentType)
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		return rr
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("file", "book.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rr := post(&body, mw.FormDataContentType())
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "идентификатор") {
+		t.Fatalf("multipart without upload_id = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	body.Reset()
+	mw = multipart.NewWriter(&body)
+	if err := mw.WriteField("upload_id", "two-files"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := mw.CreateFormFile("file", "one.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Write([]byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := mw.CreateFormFile("file", "two.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Write([]byte("2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rr = post(&body, mw.FormDataContentType())
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "по одному файлу") {
+		t.Fatalf("two files = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	body.Reset()
+	mw = multipart.NewWriter(&body)
+	if err := mw.WriteField("upload_id", strings.Repeat("x", 241)); err != nil {
+		t.Fatal(err)
+	}
+	part, err = mw.CreateFormFile("file", "book.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rr = post(&body, mw.FormDataContentType())
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversize multipart upload_id = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	body.Reset()
+	mw = multipart.NewWriter(&body)
+	if err := mw.WriteField("upload_id", "no-file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rr = post(&body, mw.FormDataContentType())
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "Файл не выбран") {
+		t.Fatalf("no file part = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = post(bytes.NewReader([]byte("raw")), "application/octet-stream")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("non-multipart without name = %d body=%s", rr.Code, rr.Body.String())
+	}
+}

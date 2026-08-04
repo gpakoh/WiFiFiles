@@ -1020,3 +1020,113 @@ func TestRenameDAVSameFileVariants(t *testing.T) {
 		t.Fatalf("dst: %q %v", data, err)
 	}
 }
+
+func TestHandlePropfindVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.MkdirAll(filepath.Join(internal, "Books"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(internal, "Books", "a.epub"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "PROPFIND", "http://pb/dav/internal/Books", "", map[string]string{"Depth": "2"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("invalid depth = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "PROPFIND", "http://pb/dav/internal/nope", "", map[string]string{"Depth": "0"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing propfind = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "PROPFIND", "http://pb/dav/internal/Books", "", map[string]string{"Depth": "infinity"})
+	if rr.Code != 207 || !strings.Contains(rr.Body.String(), "a.epub") {
+		t.Fatalf("infinity propfind = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandlePutVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.MkdirAll(filepath.Join(internal, "adir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(internal, "existing.txt"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/existing.txt", "new", nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("put overwrite = %d", rr.Code)
+	}
+	if data, err := os.ReadFile(filepath.Join(internal, "existing.txt")); err != nil || string(data) != "new" {
+		t.Fatalf("overwrite content: %q %v", data, err)
+	}
+
+	rr = davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/adir", "x", nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("put onto dir = %d", rr.Code)
+	}
+}
+
+func TestHandleCopyVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	books := filepath.Join(internal, "Books")
+	if err := os.MkdirAll(filepath.Join(books, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(books, "a.epub"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "COPY", "http://pb/dav/internal/Books/a.epub", "", nil)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("copy no destination = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/Books/a.epub", "", map[string]string{"Destination": "http://evil/dav/x"})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("copy foreign host = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav", "", map[string]string{"Destination": "http://pb/dav/internal/x"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("copy root src = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/Books/a.epub", "", map[string]string{"Destination": "http://pb/dav/internal/Books/a.epub"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("copy same path = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/missing.epub", "", map[string]string{"Destination": "http://pb/dav/internal/x.epub"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("copy missing src = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/Books", "", map[string]string{"Destination": "http://pb/dav/internal/Copied", "Depth": "0"})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("copy dir depth0 = %d body=%s", rr.Code, rr.Body.String())
+	}
+	entries, err := os.ReadDir(filepath.Join(internal, "Copied"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("depth0 copy contents: %v err=%v", entries, err)
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/Books", "", map[string]string{"Destination": "http://pb/dav/internal/CopiedFull"})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("copy dir full = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(internal, "CopiedFull", "sub")); err != nil {
+		t.Fatalf("nested copy missing: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(internal, "CopiedFull", "a.epub")); err != nil || string(data) != "a" {
+		t.Fatalf("copied file: %q %v", data, err)
+	}
+}
+
+func TestDAVUnusedPathErrors(t *testing.T) {
+	if _, err := davUnusedPath(filepath.Join(t.TempDir(), "missing"), ".x-"); err == nil {
+		t.Fatal("unused path in missing parent accepted")
+	}
+}

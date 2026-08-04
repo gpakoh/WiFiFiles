@@ -302,3 +302,30 @@ func TestHandleCredentials(t *testing.T) {
 		t.Fatal("default password still recognized after change")
 	}
 }
+
+func TestHandleControlAndControlData(t *testing.T) {
+	sm := newTestServiceManager(t)
+	req := httptest.NewRequest("GET", "/?msg=hi", nil)
+	data := sm.controlData(req)
+	if data.Version == "" || data.Username == "" {
+		t.Fatalf("controlData incomplete: %+v", data)
+	}
+	if data.Message != "hi" {
+		t.Fatalf("controlData message = %q", data.Message)
+	}
+	if data.HTTPPort == 0 {
+		t.Fatalf("controlData http port = 0")
+	}
+
+	rec := httptest.NewRecorder()
+	sm.handleControl(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleControl = %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	sm.handleControl(rec, httptest.NewRequest("GET", "/nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("handleControl /nope = %d", rec.Code)
+	}
+}

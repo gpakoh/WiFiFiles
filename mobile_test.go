@@ -124,6 +124,28 @@ func TestMobilePageDoesNotRequireMainLoginAndIsPhoneNeutral(t *testing.T) {
 	}
 }
 
+func TestMobilePageShowsDefaultBadgeWhenTargetIsDefault(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	app.cfgMu.Lock()
+	app.cfg.DefaultTarget = "internal/Books"
+	app.cfgMu.Unlock()
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token, nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `class="badge badge-default"`) || !strings.Contains(body, "По умолчанию") {
+		t.Fatalf("default badge missing:\n%s", body)
+	}
+}
+
+func TestMobilePageOmitsDefaultBadgeForOtherTargets(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token, nil))
+	if strings.Contains(rr.Body.String(), `class="badge badge-default"`) {
+		t.Fatal("default badge shown although target is not the default")
+	}
+}
+
 func TestSafeModeListsFilesButDoesNotExposeEditActions(t *testing.T) {
 	app, token, books := prepareMobileTest(t, "safe")
 	if err := os.WriteFile(filepath.Join(books, "existing.epub"), []byte("book"), 0644); err != nil {

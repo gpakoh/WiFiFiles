@@ -152,6 +152,7 @@ static char folder_error[192];
 static int folder_count = 0;
 static int folder_total = 0;
 static int folder_page = 0;
+static int folder_picker_skip = 0;
 static char qr_target[256];
 static char qr_url[160];
 static char qr_access_mode[12] = "safe";
@@ -2061,6 +2062,11 @@ static void open_phone_flow(void) {
         open_edit(2);
         return;
     }
+    /* Refresh the state file before drawing the picker so a default target,
+       recent paths or free space changed while the app was running are shown
+       without restarting the server or the app. Skip while there are unapplied
+       edits so an entered password is not lost. */
+    if (!dirty) load_state();
     if (!st.http_running) {
         if (!st.http_enabled) { st.http_enabled = 1; dirty = 1; }
         start_services();
@@ -2076,6 +2082,7 @@ static void open_phone_flow(void) {
 
 static void open_folder_path(const char *path) {
     ShowHourglass();
+    folder_picker_skip = 0;
     if (request_folder_list(path) < 0) {
         HideHourglass();
         Message(ICON_ERROR, L("Папка", "Folder", "Dossier", "Ordner"), folder_error[0] ? folder_error : L("Не удалось открыть папку", "Cannot open the folder", "Impossible d’ouvrir le dossier", "Ordner konnte nicht geöffnet werden"), 3400);
@@ -2142,10 +2149,14 @@ static void activate_current(int idx) {
             else open_folder_path("sd");
         } else if (idx == STORAGE_DEFAULT && st.default_target[0]) {
             scopy(folder_current, sizeof(folder_current), st.default_target);
-            screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+            folder_picker_skip = 1;
+            if (request_folder_list(folder_current) == 0) { screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current(); }
+            else { Message(ICON_ERROR, L("Папка", "Folder", "Dossier", "Ordner"), folder_error[0] ? folder_error : L("Не удалось открыть папку", "Cannot open the folder", "Impossible d’ouvrir le dossier", "Ordner konnte nicht geöffnet werden"), 3400); folder_picker_skip = 0; }
         } else if (idx >= STORAGE_RECENT1 && idx <= STORAGE_RECENT4 && st.recent_targets[idx - STORAGE_RECENT1][0]) {
             scopy(folder_current, sizeof(folder_current), st.recent_targets[idx - STORAGE_RECENT1]);
-            screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+            folder_picker_skip = 1;
+            if (request_folder_list(folder_current) == 0) { screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current(); }
+            else { Message(ICON_ERROR, L("Папка", "Folder", "Dossier", "Ordner"), folder_error[0] ? folder_error : L("Не удалось открыть папку", "Cannot open the folder", "Impossible d’ouvrir le dossier", "Ordner konnte nicht geöffnet werden"), 3400); folder_picker_skip = 0; }
         } else if (idx == STORAGE_BACK) { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
         return;
     }
@@ -2172,7 +2183,10 @@ static void activate_current(int idx) {
             if (request_mobile_qr("safe") == 0) { screen_mode = MODE_QR; selected = QR_BACK; draw_current(); }
         } else if (idx == QR_MODE_EDIT) {
             if (request_mobile_qr("edit") == 0) { screen_mode = MODE_QR; selected = QR_BACK; draw_current(); }
-        } else if (idx == QR_MODE_BACK) { screen_mode = MODE_FOLDER_PICKER; selected = 0; draw_current(); }
+        } else if (idx == QR_MODE_BACK) {
+            if (folder_picker_skip) { folder_picker_skip = 0; screen_mode = MODE_STORAGE_PICKER; selected = st.internal_enabled ? 0 : 1; draw_current(); }
+            else { screen_mode = MODE_FOLDER_PICKER; selected = 0; draw_current(); }
+        }
         return;
     }
     if (screen_mode == MODE_QR) {

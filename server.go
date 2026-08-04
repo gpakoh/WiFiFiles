@@ -1096,12 +1096,18 @@ func nativeStateCommand(appDir string) {
 		if ips := localIPv4s(); len(ips) > 0 {
 			ip = ips[0]
 		}
-		lines := strings.Split(string(data), "\n")
-		for i := range lines {
-			if strings.HasPrefix(lines[i], "ip=") {
-				lines[i] = "ip=" + cleanINIValue(ip)
-			}
+		freeInternal := "—"
+		freeSD := "—"
+		if free, err := availableBytes("/mnt/ext1"); err == nil {
+			freeInternal = humanSize(int64(free))
 		}
+		if free, err := availableBytes("/mnt/ext2"); err == nil {
+			freeSD = humanSize(int64(free))
+		}
+		lines := strings.Split(string(data), "\n")
+		lines = setINILine(lines, "ip", ip)
+		lines = setINILine(lines, "free_internal", freeInternal)
+		lines = setINILine(lines, "free_sd", freeSD)
 		_ = os.WriteFile(statePath, []byte(strings.Join(lines, "\n")), 0644)
 	}
 }

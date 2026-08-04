@@ -299,7 +299,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 func safeUploadName(filename string) (string, error) {
 	name := filepath.Base(strings.ReplaceAll(filename, "\\", "/"))
-	if name == "." || name == "" || strings.ContainsRune(name, 0) {
+	if name == "." || name == ".." || name == "" || strings.ContainsRune(name, 0) {
 		return "", errors.New("invalid filename")
 	}
 	return name, nil

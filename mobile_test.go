@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -746,5 +747,195 @@ func TestFlushMobilePending(t *testing.T) {
 	defer a.mobileMu.Unlock()
 	if len(a.mobilePending) != 0 {
 		t.Fatalf("pending not cleared: %v", a.mobilePending)
+	}
+}
+
+func TestMobileTextLocalization(t *testing.T) {
+	if got := mobileText("ru", "рус", "eng", "frr", "dee"); got != "рус" {
+		t.Fatalf("ru = %q", got)
+	}
+	if got := mobileText("EN", "рус", "eng", "frr", "dee"); got != "eng" {
+		t.Fatalf("EN = %q", got)
+	}
+	if got := mobileText("fr", "рус", "eng", "frr", "dee"); got != "frr" {
+		t.Fatalf("fr = %q", got)
+	}
+	if got := mobileText("de", "рус", "eng", "frr", "dee"); got != "dee" {
+		t.Fatalf("de = %q", got)
+	}
+	if got := mobileText("xx", "рус", "eng", "frr", "dee"); got != "рус" {
+		t.Fatalf("unknown = %q", got)
+	}
+}
+
+func TestMobileTargetLabel(t *testing.T) {
+	if got := mobileTargetLabel("ru", "/mnt/ext1/Books"); got == "" {
+		t.Fatal("target label empty")
+	}
+}
+
+func TestSafeUploadName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"book.fb2", "book.fb2"},
+		{"../evil.fb2", "evil.fb2"},
+		{"a\\b\\c.fb2", "c.fb2"},
+		{"/abs/path.epub", "path.epub"},
+	}
+	for _, c := range cases {
+		got, err := safeUploadName(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("safeUploadName(%q) = (%q, %v), want %q", c.in, got, err, c.want)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "\x00evil.fb2"} {
+		if _, err := safeUploadName(bad); err == nil {
+			t.Errorf("safeUploadName(%q) accepted", bad)
+		}
+	}
+}
+
+func TestSaveUploadOverwriteSemantics(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "dup.fb2")
+	if err := os.WriteFile(existing, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	hdr := newMultipartFileHeader(t, "dup.fb2", "new")
+	if err := saveUpload(dir, hdr, false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("no-overwrite = %v, want ErrExist", err)
+	}
+	if data, _ := os.ReadFile(existing); string(data) != "old" {
+		t.Fatalf("file clobbered without overwrite: %q", data)
+	}
+	if err := saveUpload(dir, hdr, true); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if data, _ := os.ReadFile(existing); string(data) != "new" {
+		t.Fatalf("overwrite content = %q", data)
+	}
+}
+
+func newMultipartFileHeader(t *testing.T, name, content string) *multipart.FileHeader {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("files", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if err := req.ParseMultipartForm(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	return req.MultipartForm.File["files"][0]
+}
+
+func TestRemoveMobileReceipts(t *testing.T) {
+	if err := os.MkdirAll(filepath.Dir(mobileReceiptPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var backup []byte
+	if data, err := os.ReadFile(mobileReceiptPath); err == nil {
+		backup = data
+	}
+	t.Cleanup(func() {
+		if backup == nil {
+			_ = os.Remove(mobileReceiptPath)
+		} else {
+			_ = os.WriteFile(mobileReceiptPath, backup, 0600)
+		}
+	})
+
+	store := mobileReceiptStore{Receipts: map[string]map[string]MobileUploadResult{
+		"tok1": {"a.fb2": {}},
+		"tok2": {"b.fb2": {}},
+	}}
+	data, _ := json.Marshal(store)
+	if err := os.WriteFile(mobileReceiptPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	removeMobileReceipts("tok1")
+	got, err := os.ReadFile(mobileReceiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after mobileReceiptStore
+	if err := json.Unmarshal(got, &after); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := after.Receipts["tok1"]; ok {
+		t.Fatal("tok1 receipt survived")
+	}
+	if _, ok := after.Receipts["tok2"]; !ok {
+		t.Fatal("tok2 receipt lost")
+	}
+
+	removeMobileReceipts("tok2")
+	after = mobileReceiptStore{}
+	if data, err := os.ReadFile(mobileReceiptPath); err == nil {
+		_ = json.Unmarshal(data, &after)
+	}
+	if len(after.Receipts) != 0 {
+		t.Fatalf("receipts not empty: %v", after.Receipts)
+	}
+
+	removeMobileReceipts("")
+	removeMobileReceipts("nope")
+	if err := os.WriteFile(mobileReceiptPath, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	removeMobileReceipts("tok3")
+}
+
+func TestHandleMobileNegativePaths(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+
+	req := httptest.NewRequest("GET", "/other/path", nil)
+	rec := httptest.NewRecorder()
+	app.handleMobile(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-m path = %d", rec.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/m/nonexistent", nil)
+	rec = httptest.NewRecorder()
+	app.handleMobile(rec, req)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("bad token = %d, want 410", rec.Code)
+	}
+
+	app.mobileMu.Lock()
+	app.mobilePending = make(map[string]map[string]struct{})
+	app.mobileTimers = make(map[string]*time.Timer)
+	app.mobileMu.Unlock()
+	if err := writeMobileTokens([]MobileTokenRecord{{Token: token, Target: "internal/system/x", Mode: "safe", Expires: time.Now().Add(time.Minute).Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest("GET", "/m/"+token, nil)
+	rec = httptest.NewRecorder()
+	app.handleMobile(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("protected target = %d, want 400", rec.Code)
+	}
+
+	if err := writeMobileTokens([]MobileTokenRecord{{Token: token, Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(time.Minute).Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest("GET", "/m/"+token+"/fragment?x=1", nil)
+	rec = httptest.NewRecorder()
+	app.handleMobile(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fragment = %d", rec.Code)
+	}
+	if rec.Header().Get("X-WiFiFiles-Free-Space") == "" {
+		t.Fatal("fragment missing free-space header")
 	}
 }

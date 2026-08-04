@@ -523,3 +523,48 @@ func TestWebDAVHidesAndProtectsSystemStorageDirectories(t *testing.T) {
 		t.Fatal("protected WebDAV path unexpectedly resolved")
 	}
 }
+
+func TestWebDAVProppatchReturnsMultistatus(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	body := `<?xml version="1.0" encoding="utf-8"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><D:displayname>newname</D:displayname></D:prop></D:set></D:propertyupdate>`
+	rr := davRequest(t, dav, "PROPPATCH", "http://pb/dav/internal/", body, map[string]string{"Depth": "0"})
+	if rr.Code != 207 {
+		t.Fatalf("PROPPATCH code = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "<D:multistatus") || !strings.Contains(rr.Body.String(), "HTTP/1.1 200 OK") {
+		t.Fatalf("PROPPATCH body: %s", rr.Body.String())
+	}
+
+	missing := davRequest(t, dav, "PROPPATCH", "http://pb/dav/internal/Books/nope", body, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("PROPPATCH missing should be 404, got %d", missing.Code)
+	}
+}
+
+func TestWebDAVMoveSameFileHardlink(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	books := filepath.Join(internal, "Books")
+	if err := os.MkdirAll(books, 0755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(books, "one.txt")
+	dst := filepath.Join(books, "two.txt")
+	if err := os.WriteFile(src, []byte("hardlinked"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(src, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/one.txt", "",
+		map[string]string{"Destination": "http://pb/dav/internal/Books/two.txt", "Overwrite": "T"})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("MOVE hardlink code = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("destination missing after MOVE: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source should be gone, stat err=%v", err)
+	}
+}

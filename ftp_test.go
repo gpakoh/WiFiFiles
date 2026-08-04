@@ -369,6 +369,133 @@ func TestFTPFeaturesAndMLST(t *testing.T) {
 	_ = c.reply()
 }
 
+func TestFTPErrorPathsAndNegativeBranches(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("CWD internal/Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD: %q", got)
+	}
+
+	if got := c.cmd("MKD existing"); !strings.HasPrefix(got, "257 ") {
+		t.Fatalf("MKD existing: %q", got)
+	}
+	if got := c.cmd("MKD existing"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MKD duplicate should be 550: %q", got)
+	}
+	if got := c.cmd("SIZE missing.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("SIZE missing: %q", got)
+	}
+	if got := c.cmd("SIZE existing"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("SIZE on dir should be 550: %q", got)
+	}
+	if got := c.cmd("MDTM missing.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MDTM missing: %q", got)
+	}
+	if got := c.cmd("DELE existing"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("DELE on dir should be 550: %q", got)
+	}
+	if got := c.cmd("RETR missing.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RETR missing: %q", got)
+	}
+	if got := c.cmd("RMD existing"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RMD empty: %q", got)
+	}
+	if got := c.cmd("RMD existing"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RMD missing should be 550: %q", got)
+	}
+	if got := c.cmd("MKD full"); !strings.HasPrefix(got, "257 ") {
+		t.Fatalf("MKD full: %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(app.roots["internal"], "Books", "full", "x.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cmd("RMD full"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RMD non-empty should be 550: %q", got)
+	}
+
+	if got := c.cmd("REST -5"); !strings.HasPrefix(got, "501 ") {
+		t.Fatalf("REST negative should be 501: %q", got)
+	}
+	if got := c.cmd("REST abc"); !strings.HasPrefix(got, "501 ") {
+		t.Fatalf("REST garbage should be 501: %q", got)
+	}
+	if got := c.cmd("MODE C"); !strings.HasPrefix(got, "504 ") {
+		t.Fatalf("MODE C should be 504: %q", got)
+	}
+	if got := c.cmd("MODE S"); !strings.HasPrefix(got, "200 ") {
+		t.Fatalf("MODE S should be 200: %q", got)
+	}
+	if got := c.cmd("STRU R"); !strings.HasPrefix(got, "504 ") {
+		t.Fatalf("STRU R should be 504: %q", got)
+	}
+	if got := c.cmd("STRU F"); !strings.HasPrefix(got, "200 ") {
+		t.Fatalf("STRU F should be 200: %q", got)
+	}
+	if got := c.cmd("STAT"); !strings.HasPrefix(got, "211 ") {
+		t.Fatalf("STAT should be 211: %q", got)
+	}
+	if got := c.cmd("STAT internal/Books"); !strings.HasPrefix(got, "502 ") {
+		t.Fatalf("STAT with path should be 502: %q", got)
+	}
+	if got := c.cmd("EPSV"); !strings.HasPrefix(got, "229 ") {
+		t.Fatalf("EPSV should be 229: %q", got)
+	}
+	if got := c.cmd("FROB"); !strings.HasPrefix(got, "502 ") {
+		t.Fatalf("unknown command should be 502: %q", got)
+	}
+	if got := c.cmd("SITE"); !strings.HasPrefix(got, "200 ") {
+		t.Fatalf("SITE should be 200: %q", got)
+	}
+
+	data := c.passive(t)
+	if got := c.cmd("ABOR"); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("ABOR after PASV should close passive listener: %q", got)
+	}
+	_ = data.Close()
+}
+
+func TestFTPListNonexistentFileAndHiddenEntries(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("LIST internal/nope"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("LIST missing should be 550: %q", got)
+	}
+
+	full := filepath.Join(app.roots["internal"], "Books", "single.txt")
+	if err := os.WriteFile(full, []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	data := c.passive(t)
+	if got := c.cmd("LIST internal/Books/single.txt"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("LIST file: %q", got)
+	}
+	listing := ftpDrain(t, data)
+	_ = c.reply()
+	if !strings.Contains(listing, "single.txt") || strings.Contains(listing, "Books") {
+		t.Fatalf("LIST of a file should list the file itself:\n%s", listing)
+	}
+
+	if err := os.MkdirAll(filepath.Join(app.roots["internal"], ".wififiles"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	data = c.passive(t)
+	if got := c.cmd("LIST internal"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("LIST internal: %q", got)
+	}
+	listing = ftpDrain(t, data)
+	_ = c.reply()
+	if !strings.Contains(listing, "Books") {
+		t.Fatalf("LIST internal should show Books:\n%s", listing)
+	}
+	if strings.Contains(listing, ".wififiles") {
+		t.Fatalf("LIST internal should hide system entries:\n%s", listing)
+	}
+}
+
 func TestFTPResumeRetrieve(t *testing.T) {
 	app, port := ftpTestServer(t)
 	c := ftpConnect(t, port)

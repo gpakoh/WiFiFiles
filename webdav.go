@@ -566,50 +566,6 @@ func writeDAVResponse(b *strings.Builder, resource davResource) {
 	b.WriteString("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
 }
 
-func (d *DAVServer) handleWindowsRootProbe(w http.ResponseWriter, r *http.Request) {
-	root, err := d.stat("/")
-	if err != nil {
-		davHTTPError(w, err)
-		return
-	}
-	resources := []davResource{root}
-	depth := strings.TrimSpace(strings.ToLower(r.Header.Get("Depth")))
-	if depth != "0" {
-		children, childErr := d.children(root)
-		if childErr != nil {
-			davHTTPError(w, childErr)
-			return
-		}
-		resources = append(resources, children...)
-	}
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`)
-	for _, item := range resources {
-		writeDAVResponse(&b, item)
-	}
-	b.WriteString("</D:multistatus>")
-	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
-	w.Header().Set("Content-Length", strconv.Itoa(b.Len()))
-	w.WriteHeader(http.StatusMultiStatus)
-	_, _ = io.WriteString(w, b.String())
-}
-
-func (d *DAVServer) handleWindowsVolumeProbe(w http.ResponseWriter, virtual string) {
-	resource, err := d.stat(virtual)
-	if err != nil {
-		davHTTPError(w, err)
-		return
-	}
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`)
-	writeDAVResponse(&b, resource)
-	b.WriteString("</D:multistatus>")
-	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
-	w.Header().Set("Content-Length", strconv.Itoa(b.Len()))
-	w.WriteHeader(http.StatusMultiStatus)
-	_, _ = io.WriteString(w, b.String())
-}
-
 func (d *DAVServer) handlePropfind(w http.ResponseWriter, r *http.Request) {
 	depth := strings.ToLower(strings.TrimSpace(r.Header.Get("Depth")))
 	if depth == "" {

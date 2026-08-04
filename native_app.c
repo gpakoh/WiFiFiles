@@ -1,4 +1,4 @@
-/* WiFiFiles 0.7.22 native InkView control panel for PocketBook 650.
+/* WiFiFiles 0.7.23 native InkView control panel for PocketBook 650.
  * Freestanding ARM EABI build: only depends on libinkview.so from firmware.
  */
 
@@ -417,7 +417,7 @@ static void prep_log_reset(void) {
     int fd;
     migrate_legacy_prep_log();
     fd = sys_open(LOG_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) { const char *h = "\n===== WiFiFiles 0.7.22 runtime preparation =====\n"; sys_write(fd, h, slen(h)); sys_close(fd); }
+    if (fd >= 0) { const char *h = "\n===== WiFiFiles 0.7.23 runtime preparation =====\n"; sys_write(fd, h, slen(h)); sys_close(fd); }
     prep_started = 1;
 }
 static void prep_log_raw(const char *text) {
@@ -526,7 +526,7 @@ static int stop_runtime_manager_if_needed(int force, const char *reason) {
     char state_version[32];
     int pid = 0, i;
     if (state_pid_and_version(&pid, state_version, sizeof(state_version)) < 0) return 0;
-    if (!force && seq(state_version, "0.7.22")) return 0;
+    if (!force && seq(state_version, "0.7.23")) return 0;
     if (pid <= 1) {
         sys_unlink(STATE_PATH);
         return 1;
@@ -1178,7 +1178,7 @@ static void draw_no_wifi(void) {
     const char *title;
     const char *body;
     ClearScreen();
-    draw_header("WiFiFiles 0.7.22");
+    draw_header("WiFiFiles 0.7.23");
     if (wifi_refresh_in_progress) {
         title = L("Выполняется поиск…", "Searching…", "Recherche en cours…", "Suche läuft…");
         if (wifi_refresh_existing_connection) {
@@ -1313,7 +1313,7 @@ static void draw_main(void) {
     int i;
     if (!st.ip[0]) { if (selected != MAIN_REFRESH && selected != MAIN_START) selected = MAIN_START; draw_no_wifi(); return; }
     ClearScreen();
-    draw_header("WiFiFiles 0.7.22");
+    draw_header("WiFiFiles 0.7.23");
     draw_main_status();
     for (i = 0; i < MAIN_ROW_COUNT; i++) draw_main_row_idx(i);
     if (st.message[0]) draw_text(font_help, 22, 839, screen_w - 44, 98, st.message, ALIGN_CENTER | VALIGN_MIDDLE | DOTS);

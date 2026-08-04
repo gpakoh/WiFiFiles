@@ -49,6 +49,7 @@ const (
 	nativeFolderListPath    = "/tmp/WiFiFiles/native_folder_list.ini"
 	nativeMobileRequestPath = "/tmp/WiFiFiles/native_mobile_request.ini"
 	nativeMobileQRPath      = "/tmp/WiFiFiles/native_mobile_qr.ini"
+	nativeMobileDefaultPath = "/tmp/WiFiFiles/native_mobile_default.ini"
 	mobileTokenPath         = "/tmp/WiFiFiles/mobile_token.json"
 )
 
@@ -71,8 +72,9 @@ type Config struct {
 	LoggingEnabled bool   `json:"logging_enabled"`
 	Language       string `json:"language,omitempty"`
 
-	InternalEnabled bool `json:"internal_enabled"`
-	SDEnabled       bool `json:"sd_enabled"`
+	InternalEnabled bool   `json:"internal_enabled"`
+	SDEnabled       bool   `json:"sd_enabled"`
+	DefaultTarget   string `json:"default_target,omitempty"`
 }
 
 type App struct {
@@ -245,6 +247,9 @@ func main() {
 			return
 		case "--native-mobile-qr-file":
 			nativeMobileQRFile(appDir)
+			return
+		case "--native-mobile-default-save":
+			nativeSaveDefaultTarget(appDir)
 			return
 		case "--serve": // compatibility with 0.1.x
 			runServer(appDir)
@@ -916,6 +921,7 @@ func writeNativeState(sm *ServiceManager, message string) {
 	fmt.Fprintf(&b, "password_is_default=%d\n", bool01(usesDefaultPassword(cfg)))
 	fmt.Fprintf(&b, "uid=%d\n", os.Getuid())
 	fmt.Fprintf(&b, "smb_available=1\n")
+	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
 	fmt.Fprintf(&b, "message=%s\n", cleanINIValue(message))
 	statePath := nativeStatePath(sm.appDir)
 	_ = os.Remove(statePath)
@@ -945,6 +951,7 @@ func writeNativeStateStopped(appDir, message string) {
 	fmt.Fprintf(&b, "smb_enabled=%d\nsmb_running=0\nsmb_port=%d\nsmb_error=\nsmb_credentials_ready=%d\n", bool01(cfg.SMBEnabled), smbListenPort(cfg), bool01(cfg.SMBNTHash != ""))
 	fmt.Fprintf(&b, "internal_enabled=%d\nsd_enabled=%d\nlogging_enabled=%d\n", bool01(cfg.InternalEnabled), bool01(cfg.SDEnabled), bool01(cfg.LoggingEnabled))
 	fmt.Fprintf(&b, "username=%s\nlanguage=%s\npassword_is_default=%d\nuid=%d\nsmb_available=1\n", cleanINIValue(cfg.Username), cleanINIValue(cfg.Language), bool01(usesDefaultPassword(cfg)), os.Getuid())
+	fmt.Fprintf(&b, "default_target=%s\n", cleanINIValue(cfg.DefaultTarget))
 	fmt.Fprintf(&b, "message=%s\n", cleanINIValue(message))
 	statePath := nativeStatePath(appDir)
 	_ = os.Remove(statePath)
@@ -1118,6 +1125,31 @@ func nativeSetLanguageFile(appDir string) {
 		_ = os.WriteFile(statePath, []byte(strings.Join(lines, "\n")), 0666)
 		_ = os.Chmod(statePath, 0666)
 	}
+}
+
+func nativeSaveDefaultTarget(appDir string) {
+	data, err := os.ReadFile(nativeMobileDefaultPath)
+	if err != nil {
+		writeNativeStateStopped(appDir, "Default target file not found")
+		return
+	}
+	_ = os.Remove(nativeMobileDefaultPath)
+	vals := parseNativeApply(data)
+	target := strings.TrimSpace(vals["default_target"])
+	app, err := newApp(persistentConfigPath)
+	if err != nil {
+		writeNativeStateStopped(appDir, err.Error())
+		return
+	}
+	app.cfgMu.Lock()
+	app.cfg.DefaultTarget = target
+	app.cfg.ConfigVersion = 7
+	app.cfgMu.Unlock()
+	if err := app.saveConfig(); err != nil {
+		writeNativeStateStopped(appDir, "Error saving default target: "+err.Error())
+		return
+	}
+	nativeStateCommand(appDir)
 }
 
 func writeNativeINI(path string, lines []string) {

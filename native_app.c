@@ -181,6 +181,7 @@ static const char FOLDER_REQUEST_PATH[] = "/tmp/WiFiFiles/native_folder_request.
 static const char FOLDER_LIST_PATH[] = "/tmp/WiFiFiles/native_folder_list.ini";
 static const char MOBILE_REQUEST_PATH[] = "/tmp/WiFiFiles/native_mobile_request.ini";
 static const char MOBILE_QR_PATH[] = "/tmp/WiFiFiles/native_mobile_qr.ini";
+static const char MOBILE_DEFAULT_PATH[] = "/tmp/WiFiFiles/native_mobile_default.ini";
 
 struct app_state {
     int running;
@@ -206,6 +207,7 @@ struct app_state {
     char language[8];
     int password_is_default;
     int uid;
+    char default_target[256];
     char message[192];
 };
 
@@ -260,33 +262,7 @@ static int contains_ci(const char *text, const char *needle) {
     }
     return 0;
 }
-static int atoi10(const char *s) {
-    int n = 0, i = 0;
-    if (!s) return 0;
-    while (s[i] >= '0' && s[i] <= '9') { n = n * 10 + (s[i] - '0'); i++; }
-    return n;
-}
-static void append_int(char *dst, int cap, int value) {
-    char t[16]; int n = 0; unsigned int v;
-    if (value < 0) { scat(dst, cap, "-"); v = (unsigned int)(-value); } else v = (unsigned int)value;
-    if (v == 0) { scat(dst, cap, "0"); return; }
-    while (v && n < 15) {
-        unsigned int q = 0, rem = v;
-        /* Division-free base-10 conversion. */
-        while (rem >= 1000000000U) { rem -= 1000000000U; q += 100000000U; }
-        while (rem >= 100000000U) { rem -= 100000000U; q += 10000000U; }
-        while (rem >= 10000000U) { rem -= 10000000U; q += 1000000U; }
-        while (rem >= 1000000U) { rem -= 1000000U; q += 100000U; }
-        while (rem >= 100000U) { rem -= 100000U; q += 10000U; }
-        while (rem >= 10000U) { rem -= 10000U; q += 1000U; }
-        while (rem >= 1000U) { rem -= 1000U; q += 100U; }
-        while (rem >= 100U) { rem -= 100U; q += 10U; }
-        while (rem >= 10U) { rem -= 10U; q += 1U; }
-        t[n++] = (char)('0' + rem);
-        v = q;
-    }
-    while (n--) { char c[2]; c[0] = t[n]; c[1] = 0; scat(dst, cap, c); }
-}
+
 
 static int sys_open(const char *path, int flags, int mode) {
     register int r0 asm("r0") = (int)path;
@@ -759,10 +735,12 @@ static int instruction_page = 0;
 #define MAIN_REFRESH 14
 #define MAIN_START 15
 #define STORAGE_BACK 2
+#define STORAGE_DEFAULT 3
 #define FOLDER_BACK 10
 #define FOLDER_UP 11
 #define FOLDER_PREV 12
 #define FOLDER_NEXT 13
+#define FOLDER_REMEMBER 14
 #define QR_MODE_SAFE 0
 #define QR_MODE_EDIT 1
 #define QR_MODE_BACK 2
@@ -991,6 +969,7 @@ static void load_state(void) {
     ini_value(data, "language", st.language, sizeof(st.language));
     st.password_is_default = ini_int(data, "password_is_default", 1);
     st.uid = ini_int(data, "uid", 101);
+    ini_value(data, "default_target", st.default_target, sizeof(st.default_target));
     ini_value(data, "message", v, sizeof(v)); scopy(st.message, sizeof(st.message), v);
     current_lang = lang_from_code(st.language);
     localize_helper_message(st.message, sizeof(st.message));
@@ -1083,6 +1062,19 @@ static int request_mobile_qr(const char *access_mode) {
             return -1;
         }
     }
+    return 0;
+}
+
+static int save_default_target(const char *path) {
+    char request[320];
+    request[0] = 0;
+    scat(request, sizeof(request), "default_target="); scat(request, sizeof(request), path); scat(request, sizeof(request), "\n");
+    if (write_all(MOBILE_DEFAULT_PATH, request) < 0) {
+        Message(ICON_ERROR, "WiFiFiles", L("Не удалось сохранить путь по умолчанию", "Cannot save default path", "Impossible d'enregistrer le chemin par défaut", "Der Standardpfad konnte nicht gespeichert werden"), 2800);
+        return -1;
+    }
+    ShowHourglass(); run_helper("--native-mobile-default-save"); HideHourglass();
+    load_state();
     return 0;
 }
 
@@ -1614,17 +1606,26 @@ static void draw_language(void) {
 }
 
 static void draw_storage_picker(void) {
+    char default_label[320];
     int y = 220, by = screen_h - 72;
     ClearScreen();
     draw_header(L("Передача с телефона по QR-коду", "Phone transfer by QR code", "Transfert depuis un téléphone par code QR", "Übertragung vom Telefon per QR-Code"));
     draw_text(font_main, 34, 92, screen_w - 68, 92,
         L("Сначала выберите память. На следующем экране можно открыть любую папку и указать, куда сохранять книги.",
           "First choose the storage. On the next screen you can open any folder and select where books will be saved.",
-          "Choisissez d’abord la mémoire. À l’écran suivant, vous pourrez ouvrir n’importe quel dossier et choisir où enregistrer les livres.",
+          "Choisissez d'abord la mémoire. À l'écran suivant, vous pourrez ouvrir n'importe quel dossier et choisir où enregistrer les livres.",
           "Wählen Sie zuerst den Speicher. Im nächsten Bildschirm können Sie jeden Ordner öffnen und als Ziel auswählen."),
         ALIGN_CENTER | VALIGN_MIDDLE);
     draw_row(0, y, L("Память ридера", "Reader storage", "Mémoire du lecteur", "Reader-Speicher"), st.internal_enabled ? ">" : L("ВЫКЛ", "OFF", "DÉSACTIVÉ", "AUS"), !st.internal_enabled);
     draw_row(1, y + 70, L("Карта памяти SD", "SD card", "Carte SD", "SD-Karte"), st.sd_enabled ? ">" : L("ВЫКЛ", "OFF", "DÉSACTIVÉ", "AUS"), !st.sd_enabled);
+    if (st.default_target[0]) {
+        char path_label[280];
+        virtual_path_label(st.default_target, path_label, sizeof(path_label));
+        default_label[0] = 0;
+        scat(default_label, sizeof(default_label), L("По умолчанию: ", "Default: ", "Par défaut : ", "Standard: "));
+        scat(default_label, sizeof(default_label), path_label);
+        draw_row(STORAGE_DEFAULT, y + 140, default_label, ">", 0);
+    }
     draw_action(STORAGE_BACK, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
     finish_screen_update();
 }
@@ -1635,14 +1636,19 @@ static void draw_folder_picker(void) {
     int y = 225, by = screen_h - 72;
     int bw = (screen_w - 60) / 4;
     int x1 = 18, x2 = x1 + bw + 8, x3 = x2 + bw + 8, x4 = x3 + bw + 8;
+    int half_w = (screen_w - 44) / 2;
     ClearScreen();
     draw_header(L("Выберите папку", "Choose a folder", "Choisir un dossier", "Ordner auswählen"));
     virtual_path_label(folder_current, path_label, sizeof(path_label));
     FillArea(18, 78, screen_w - 36, 58, VLGRAY); DrawRect(18, 78, screen_w - 36, 58, BLACK);
     draw_text(font_main, 30, 81, screen_w - 60, 52, path_label, ALIGN_LEFT | VALIGN_MIDDLE | DOTS);
-    FillArea(18, 150, screen_w - 36, 58, selected == 0 ? LGRAY : WHITE); DrawRect(18, 150, screen_w - 36, 58, BLACK);
-    draw_text(font_block_title, 30, 150, screen_w - 60, 58,
-        L("✓ СОХРАНЯТЬ В ЭТУ ПАПКУ", "✓ SAVE TO THIS FOLDER", "✓ ENREGISTRER DANS CE DOSSIER", "✓ IN DIESEM ORDNER SPEICHERN"),
+    FillArea(18, 150, half_w, 58, selected == 0 ? LGRAY : WHITE); DrawRect(18, 150, half_w, 58, BLACK);
+    draw_text(font_block_title, 20, 150, half_w - 16, 58,
+        L("✓ СОХРАНИТЬ", "✓ SAVE", "✓ ENREGISTRER", "✓ SPEICHERN"),
+        ALIGN_CENTER | VALIGN_MIDDLE | DOTS);
+    FillArea(26 + half_w, 150, half_w, 58, selected == FOLDER_REMEMBER ? LGRAY : WHITE); DrawRect(26 + half_w, 150, half_w, 58, BLACK);
+    draw_text(font_block_title, 28 + half_w, 150, half_w - 16, 58,
+        L("★ ЗАПОМНИТЬ", "★ REMEMBER", "★ MÉMORISER", "★ MERKEN"),
         ALIGN_CENTER | VALIGN_MIDDLE | DOTS);
     for (i = 0; i < visible; i++) {
         int idx = i + 1;
@@ -2051,6 +2057,9 @@ static void activate_current(int idx) {
         } else if (idx == 1) {
             if (!st.sd_enabled) Message(ICON_WARNING, L("Память", "Storage", "Mémoire", "Speicher"), L("Карта SD отключена в настройках", "The SD card is disabled in settings", "La carte SD est désactivée dans les réglages", "Die SD-Karte ist in den Einstellungen deaktiviert"), 2800);
             else open_folder_path("sd");
+        } else if (idx == STORAGE_DEFAULT && st.default_target[0]) {
+            scopy(folder_current, sizeof(folder_current), st.default_target);
+            screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
         } else if (idx == STORAGE_BACK) { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
         return;
     }
@@ -2059,6 +2068,11 @@ static void activate_current(int idx) {
         int start = folder_page * FOLDER_PAGE_SIZE;
         if (idx == 0) {
             screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+        } else if (idx == FOLDER_REMEMBER) {
+            save_default_target(folder_current);
+            Message(ICON_INFORMATION, "WiFiFiles",
+                L("Путь по умолчанию сохранён", "Default path saved", "Chemin par défaut enregistré", "Standardpfad gespeichert"), 2600);
+            draw_current();
         } else if (idx >= 1 && idx <= visible) {
             open_folder_path(folder_dirs[start + idx - 1]);
         } else if (idx == FOLDER_BACK) { screen_mode = MODE_STORAGE_PICKER; selected = starts(folder_current, "sd") ? 1 : 0; draw_current(); }
@@ -2128,12 +2142,17 @@ static int current_item_from_y(int x, int y) {
     if (screen_mode == MODE_STORAGE_PICKER) {
         if (y >= 220 && y < 265) return 0;
         if (y >= 290 && y < 335) return 1;
+        if (st.default_target[0] && y >= 360 && y < 405) return STORAGE_DEFAULT;
         if (y >= screen_h - 72 && x >= 18 && x < 238) return STORAGE_BACK;
         return -1;
     }
     if (screen_mode == MODE_FOLDER_PICKER) {
         int visible = folder_visible_count();
-        if (y >= 150 && y < 208) return 0;
+        int half_w = (screen_w - 44) / 2;
+        if (y >= 150 && y < 208) {
+            if (x >= 18 && x < 18 + half_w) return 0;
+            if (x >= 26 + half_w && x < 26 + half_w + half_w) return FOLDER_REMEMBER;
+        }
         for (i = 0; i < visible; i++) { int yy = 225 + i * 62; if (y >= yy && y < yy + 54) return i + 1; }
         if (y >= screen_h - 72) {
             int bw = (screen_w - 60) / 4, x1 = 18, x2 = x1 + bw + 8, x3 = x2 + bw + 8, x4 = x3 + bw + 8;
@@ -2161,8 +2180,8 @@ static int max_selected(void) {
     if (screen_mode == MODE_LANGUAGE) return st.language[0] ? 4 : 3;
     if (screen_mode == MODE_INSTRUCTIONS) return 6;
     if (screen_mode == MODE_INSTRUCTION_DETAIL) return 2;
-    if (screen_mode == MODE_STORAGE_PICKER) return STORAGE_BACK;
-    if (screen_mode == MODE_FOLDER_PICKER) return FOLDER_NEXT;
+    if (screen_mode == MODE_STORAGE_PICKER) return st.default_target[0] ? STORAGE_DEFAULT : STORAGE_BACK;
+    if (screen_mode == MODE_FOLDER_PICKER) return FOLDER_REMEMBER;
     if (screen_mode == MODE_QR_MODE) return QR_MODE_BACK;
     if (screen_mode == MODE_QR) return QR_CHANGE_FOLDER;
     if (!st.ip[0]) return MAIN_START;
@@ -2188,12 +2207,13 @@ static int selection_valid(int idx) {
     if (screen_mode == MODE_STORAGE_PICKER) {
         if (idx == 0) return st.internal_enabled;
         if (idx == 1) return st.sd_enabled;
+        if (idx == STORAGE_DEFAULT) return st.default_target[0] != 0;
         return idx == STORAGE_BACK;
     }
     if (screen_mode == MODE_FOLDER_PICKER) {
         int visible = folder_visible_count();
         int start = folder_page * FOLDER_PAGE_SIZE;
-        if (idx == 0 || idx == FOLDER_BACK) return 1;
+        if (idx == 0 || idx == FOLDER_BACK || idx == FOLDER_REMEMBER) return 1;
         if (idx >= 1 && idx <= visible) return 1;
         if (idx == FOLDER_UP) return folder_parent[0] != 0;
         if (idx == FOLDER_PREV) return folder_page > 0;

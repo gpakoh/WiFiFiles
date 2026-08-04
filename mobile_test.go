@@ -702,3 +702,29 @@ func TestSyncStateTargetsAppendsMissing(t *testing.T) {
 		t.Fatalf("state missing appended recent1:\n%s", got)
 	}
 }
+
+func TestRefreshDynamicStateReplacesAndKeepsOtherKeys(t *testing.T) {
+	original := "version=0.7.23\nrunning=1\nip=192.168.1.5\nfree_internal=12.3 GiB\nfree_sd=1.0 GiB\ndefault_target=internal/Books\n"
+	got := string(refreshDynamicState([]byte(original), "10.0.0.2", "9.8 GiB", "512.0 MiB"))
+	wantContains := []string{"version=0.7.23", "running=1", "ip=10.0.0.2", "free_internal=9.8 GiB", "free_sd=512.0 MiB", "default_target=internal/Books"}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Fatalf("state missing %q in:\n%s", w, got)
+		}
+	}
+	for _, old := range []string{"ip=192.168.1.5", "free_internal=12.3 GiB", "free_sd=1.0 GiB"} {
+		if strings.Contains(got, old) {
+			t.Fatalf("state still has old value %q:\n%s", old, got)
+		}
+	}
+}
+
+func TestRefreshDynamicStateAppendsMissing(t *testing.T) {
+	got := string(refreshDynamicState([]byte("running=1\nip=\n"), "10.0.0.2", "—", "—"))
+	wantContains := []string{"running=1", "ip=10.0.0.2", "free_internal=—", "free_sd=—"}
+	for _, w := range wantContains {
+		if !strings.Contains(got, w) {
+			t.Fatalf("state missing %q in:\n%s", w, got)
+		}
+	}
+}

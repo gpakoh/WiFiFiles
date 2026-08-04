@@ -1104,12 +1104,19 @@ func nativeStateCommand(appDir string) {
 		if free, err := availableBytes("/mnt/ext2"); err == nil {
 			freeSD = humanSize(int64(free))
 		}
-		lines := strings.Split(string(data), "\n")
-		lines = setINILine(lines, "ip", ip)
-		lines = setINILine(lines, "free_internal", freeInternal)
-		lines = setINILine(lines, "free_sd", freeSD)
-		_ = os.WriteFile(statePath, []byte(strings.Join(lines, "\n")), 0644)
+		_ = os.WriteFile(statePath, refreshDynamicState(data, ip, freeInternal, freeSD), 0644)
 	}
+}
+
+// refreshDynamicState returns the state file content with the dynamic
+// fields (ip, free space) updated so the native panel sees current values
+// without restarting the server.
+func refreshDynamicState(data []byte, ip, freeInternal, freeSD string) []byte {
+	lines := strings.Split(string(data), "\n")
+	lines = setINILine(lines, "ip", ip)
+	lines = setINILine(lines, "free_internal", freeInternal)
+	lines = setINILine(lines, "free_sd", freeSD)
+	return []byte(strings.Join(lines, "\n"))
 }
 
 func normalizeLanguage(value string) string {

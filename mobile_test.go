@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -43,7 +44,7 @@ func prepareMobileTest(t *testing.T, mode string) (*App, string, string) {
 	app.roots["sd"] = sd
 	token := "0123456789abcdef"
 	record := MobileTokenRecord{Token: token, Target: "internal/Books", Mode: mode, Expires: time.Now().Add(time.Minute).Unix()}
-	data, _ := json.Marshal(record)
+	data, _ := json.Marshal([]MobileTokenRecord{record})
 	if err := os.WriteFile(mobileTokenPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -466,5 +467,99 @@ func TestMobileLargeUploadDoesNotUseSystemTemp(t *testing.T) {
 	}
 	if _, err := os.Stat(missingTemp); !errorsIsNotExist(err) {
 		t.Fatalf("system temp unexpectedly used: %v", err)
+	}
+}
+
+func writeMobileTokensForTest(t *testing.T, records ...MobileTokenRecord) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(mobileTokenPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(records)
+	if err := os.WriteFile(mobileTokenPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMobileTokenQueueKeepsMultipleValidTokens(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.Remove(mobileTokenPath)
+		_ = os.Remove(mobileReceiptPath)
+	})
+	first := MobileTokenRecord{Token: "aaaaaaaaaaaaaaaa", Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(time.Minute).Unix()}
+	second := MobileTokenRecord{Token: "bbbbbbbbbbbbbbbb", Target: "internal/Books", Mode: "edit", Expires: time.Now().Add(time.Minute).Unix()}
+	writeMobileTokensForTest(t, first, second)
+	r1, err := loadMobileToken(first.Token)
+	if err != nil || r1.Mode != "safe" {
+		t.Fatalf("first token err=%v record=%+v", err, r1)
+	}
+	r2, err := loadMobileToken(second.Token)
+	if err != nil || r2.Mode != "edit" {
+		t.Fatalf("second token err=%v record=%+v", err, r2)
+	}
+	records, err := readMobileTokens()
+	if err != nil || len(records) != 2 {
+		t.Fatalf("queue after loads: %d records err=%v", len(records), err)
+	}
+}
+
+func TestMobileTokenQueueAddKeepsExistingAndPrunesExpired(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.Remove(mobileTokenPath)
+		_ = os.Remove(mobileReceiptPath)
+	})
+	old := MobileTokenRecord{Token: "cccccccccccccccc", Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(-time.Minute).Unix()}
+	writeMobileTokensForTest(t, old)
+	if _, err := loadMobileToken("cccccccccccccccc"); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired token err=%v", err)
+	}
+	if err := addMobileToken(MobileTokenRecord{Token: "dddddddddddddddd", Target: "sd/Books", Mode: "edit", Expires: time.Now().Add(time.Minute).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := readMobileTokens()
+	if err != nil || len(records) != 1 || records[0].Token != "dddddddddddddddd" {
+		t.Fatalf("queue after add: %+v err=%v", records, err)
+	}
+	if _, err := loadMobileToken("dddddddddddddddd"); err != nil {
+		t.Fatalf("new token err=%v", err)
+	}
+}
+
+func TestMobileTokenQueuePrunesExcessTokens(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.Remove(mobileTokenPath)
+		_ = os.Remove(mobileReceiptPath)
+	})
+	records := make([]MobileTokenRecord, 0, maxMobileTokens+2)
+	for i := 0; i < maxMobileTokens+2; i++ {
+		records = append(records, MobileTokenRecord{Token: fmt.Sprintf("%016d", i), Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(time.Hour).Unix()})
+	}
+	writeMobileTokensForTest(t, records...)
+	queue, err := readMobileTokens()
+	if err != nil || len(queue) != maxMobileTokens {
+		t.Fatalf("queue size=%d err=%v want=%d", len(queue), err, maxMobileTokens)
+	}
+}
+
+func TestMobileTokenQueueExpiredTokenDoesNotKillLiveReceipts(t *testing.T) {
+	t.Cleanup(func() {
+		_ = os.Remove(mobileTokenPath)
+		_ = os.Remove(mobileReceiptPath)
+	})
+	live := MobileTokenRecord{Token: "eeeeeeeeeeeeeeee", Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(time.Minute).Unix()}
+	dead := MobileTokenRecord{Token: "ffffffffffffffff", Target: "internal/Books", Mode: "safe", Expires: time.Now().Add(-time.Minute).Unix()}
+	writeMobileTokensForTest(t, live, dead)
+	if err := os.MkdirAll(filepath.Dir(mobileTokenPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadMobileToken(dead.Token); err == nil {
+		t.Fatal("expired token accepted")
+	}
+	if _, err := loadMobileToken(live.Token); err != nil {
+		t.Fatalf("live token dropped after expiry of another: %v", err)
+	}
+	records, err := readMobileTokens()
+	if err != nil || len(records) != 1 || records[0].Token != live.Token {
+		t.Fatalf("queue=%+v err=%v", records, err)
 	}
 }

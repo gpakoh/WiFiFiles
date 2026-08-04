@@ -17,22 +17,99 @@ import (
 	"time"
 )
 
+const maxMobileTokens = 8
+
+func readMobileTokens() ([]MobileTokenRecord, error) {
+	data, err := os.ReadFile(mobileTokenPath)
+	if err != nil {
+		return nil, err
+	}
+	var records []MobileTokenRecord
+	if err := json.Unmarshal(data, &records); err == nil {
+		if len(records) > maxMobileTokens {
+			records = records[len(records)-maxMobileTokens:]
+		}
+		return records, nil
+	}
+	var single MobileTokenRecord
+	if err := json.Unmarshal(data, &single); err != nil {
+		return nil, err
+	}
+	return []MobileTokenRecord{single}, nil
+}
+
+func writeMobileTokens(records []MobileTokenRecord) error {
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	_ = os.MkdirAll(filepath.Dir(mobileTokenPath), 0700)
+	tmp := mobileTokenPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, mobileTokenPath)
+}
+
+func addMobileToken(record MobileTokenRecord) error {
+	records, _ := readMobileTokens()
+	now := time.Now().Unix()
+	kept := make([]MobileTokenRecord, 0, len(records)+1)
+	for _, r := range records {
+		if r.Token == record.Token {
+			continue
+		}
+		if now > r.Expires {
+			removeMobileReceipts(r.Token)
+			continue
+		}
+		kept = append(kept, r)
+	}
+	kept = append(kept, record)
+	if len(kept) > maxMobileTokens {
+		excess := kept[:len(kept)-maxMobileTokens]
+		kept = kept[len(kept)-maxMobileTokens:]
+		for _, r := range excess {
+			removeMobileReceipts(r.Token)
+		}
+	}
+	return writeMobileTokens(kept)
+}
+
 func loadMobileToken(token string) (MobileTokenRecord, error) {
 	var record MobileTokenRecord
-	data, err := os.ReadFile(mobileTokenPath)
+	records, err := readMobileTokens()
 	if err != nil {
 		return record, errors.New("temporary link not found")
 	}
-	if err := json.Unmarshal(data, &record); err != nil {
-		return record, errors.New("temporary link is damaged")
+	now := time.Now().Unix()
+	kept := make([]MobileTokenRecord, 0, len(records))
+	found, expired := false, false
+	for _, r := range records {
+		if r.Token != token {
+			kept = append(kept, r)
+			continue
+		}
+		found = true
+		if now > r.Expires {
+			expired = true
+			removeMobileReceipts(r.Token)
+			continue
+		}
+		record = r
+		kept = append(kept, r)
 	}
-	if token == "" || subtle.ConstantTimeCompare([]byte(record.Token), []byte(token)) != 1 {
+	if len(kept) != len(records) {
+		_ = writeMobileTokens(kept)
+	}
+	if expired {
+		return record, errors.New("temporary link has expired")
+	}
+	if !found {
 		return record, errors.New("temporary link is invalid")
 	}
-	if time.Now().Unix() > record.Expires {
-		_ = os.Remove(mobileTokenPath)
-		_ = os.Remove(mobileReceiptPath)
-		return record, errors.New("temporary link has expired")
+	if subtle.ConstantTimeCompare([]byte(record.Token), []byte(token)) != 1 {
+		return record, errors.New("temporary link is invalid")
 	}
 	record.Mode = normalizeMobileMode(record.Mode)
 	return record, nil

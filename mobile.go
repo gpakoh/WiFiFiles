@@ -27,8 +27,7 @@ type MobileUploadResult struct {
 }
 
 type mobileReceiptStore struct {
-	Token   string                        `json:"token"`
-	Results map[string]MobileUploadResult `json:"results"`
+	Receipts map[string]map[string]MobileUploadResult `json:"receipts"`
 }
 
 type mobileFolderEntry struct {
@@ -99,11 +98,15 @@ func (a *App) getMobileReceipt(token, uploadID string) (MobileUploadResult, bool
 		return MobileUploadResult{}, false
 	}
 	var store mobileReceiptStore
-	if json.Unmarshal(data, &store) != nil || store.Token != token || store.Results == nil {
+	if json.Unmarshal(data, &store) != nil || store.Receipts == nil {
 		return MobileUploadResult{}, false
 	}
-	a.mobileReceipts[token] = store.Results
-	result, ok := store.Results[uploadID]
+	results, ok := store.Receipts[token]
+	if !ok || results == nil {
+		return MobileUploadResult{}, false
+	}
+	a.mobileReceipts[token] = results
+	result, ok := results[uploadID]
 	return result, ok
 }
 
@@ -116,9 +119,53 @@ func (a *App) saveMobileReceipt(token, uploadID string, result MobileUploadResul
 		a.mobileReceipts[token] = results
 	}
 	results[uploadID] = result
-	store := mobileReceiptStore{Token: token, Results: results}
+	store := mobileReceiptStore{Receipts: a.mobileReceipts}
+	if data, err := os.ReadFile(mobileReceiptPath); err == nil {
+		var onDisk mobileReceiptStore
+		if json.Unmarshal(data, &onDisk) == nil && onDisk.Receipts != nil {
+			for tok, tokResults := range onDisk.Receipts {
+				if tokResults == nil {
+					continue
+				}
+				existing := store.Receipts[tok]
+				if existing == nil {
+					store.Receipts[tok] = tokResults
+				} else {
+					for id, r := range tokResults {
+						if _, ok := existing[id]; !ok {
+							existing[id] = r
+						}
+					}
+				}
+			}
+		}
+	}
 	if data, err := json.Marshal(store); err == nil {
 		_ = os.MkdirAll(filepath.Dir(mobileReceiptPath), 0700)
+		tmp := mobileReceiptPath + ".tmp"
+		if os.WriteFile(tmp, data, 0600) == nil {
+			_ = os.Rename(tmp, mobileReceiptPath)
+		}
+	}
+}
+
+func removeMobileReceipts(token string) {
+	if token == "" {
+		return
+	}
+	data, err := os.ReadFile(mobileReceiptPath)
+	if err != nil {
+		return
+	}
+	var store mobileReceiptStore
+	if json.Unmarshal(data, &store) != nil || store.Receipts == nil {
+		return
+	}
+	if _, ok := store.Receipts[token]; !ok {
+		return
+	}
+	delete(store.Receipts, token)
+	if data, err := json.Marshal(store); err == nil {
 		tmp := mobileReceiptPath + ".tmp"
 		if os.WriteFile(tmp, data, 0600) == nil {
 			_ = os.Rename(tmp, mobileReceiptPath)

@@ -1235,14 +1235,7 @@ func nativeMobileQRFile(appDir string) {
 		mode = "safe"
 	}
 	record := MobileTokenRecord{Token: token, Target: target, Mode: mode, Expires: time.Now().Add(20 * time.Minute).Unix()}
-	recordData, err := json.Marshal(record)
-	if err != nil {
-		writeNativeINI(nativeMobileQRPath, []string{"error=" + err.Error()})
-		return
-	}
-	_ = os.Remove(mobileReceiptPath)
-	tmp := mobileTokenPath + ".tmp"
-	if err := os.WriteFile(tmp, recordData, 0600); err != nil || os.Rename(tmp, mobileTokenPath) != nil {
+	if err := addMobileToken(record); err != nil {
 		writeNativeINI(nativeMobileQRPath, []string{"error=Не удалось создать временную ссылку"})
 		return
 	}

@@ -815,3 +815,208 @@ func TestHandleLockVariants(t *testing.T) {
 		t.Fatalf("unlock = %d, want 204", rr.Code)
 	}
 }
+
+func TestHandleMkcolVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.MkdirAll(filepath.Join(internal, "exists"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "MKCOL", "http://pb/dav/internal/withbody", "x", nil)
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("mkcol with body = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MKCOL", "http://pb/dav/internal/nope/sub", "", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("mkcol missing parent = %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "MKCOL", "http://pb/dav/internal/exists", "", nil)
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("mkcol existing = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MKCOL", "http://pb/dav/internal/system/x", "", nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("mkcol protected = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MKCOL", "http://pb/dav/internal/NewDir", "", nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("mkcol ok = %d", rr.Code)
+	}
+	if st, err := os.Stat(filepath.Join(internal, "NewDir")); err != nil || !st.IsDir() {
+		t.Fatalf("mkcol dir missing: %v", err)
+	}
+}
+
+func TestHandleDeleteVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.WriteFile(filepath.Join(internal, "file.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(internal, "dir", "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, http.MethodDelete, "http://pb/dav/internal/missing.txt", "", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("delete missing = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, http.MethodDelete, "http://pb/dav/internal/system/x", "", nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("delete protected = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, http.MethodDelete, "http://pb/dav/internal/file.txt", "", nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("delete file = %d", rr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(internal, "file.txt")); !os.IsNotExist(err) {
+		t.Fatalf("file not removed: %v", err)
+	}
+
+	rr = davRequest(t, dav, http.MethodDelete, "http://pb/dav/internal/dir", "", nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("delete dir = %d", rr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(internal, "dir")); !os.IsNotExist(err) {
+		t.Fatalf("dir not removed: %v", err)
+	}
+}
+
+func TestHandleMoveVariants(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	sd := dav.app.roots["sd"]
+	books := filepath.Join(internal, "Books")
+	if err := os.MkdirAll(books, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(books, "a.txt"), []byte("A"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", nil)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("move no destination = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", map[string]string{"Destination": "http://evil/dav/internal/x"})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("move foreign host = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav", "", map[string]string{"Destination": "http://pb/dav/internal/x"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("move root src = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", map[string]string{"Destination": "http://pb/dav"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("move root dst = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books", "", map[string]string{"Destination": "http://pb/dav/internal/Books/Sub"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("move into itself = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/missing.txt", "", map[string]string{"Destination": "http://pb/dav/internal/x.txt"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("move missing src = %d", rr.Code)
+	}
+
+	if err := os.WriteFile(filepath.Join(internal, "afile.txt"), []byte("F"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", map[string]string{"Destination": "http://pb/dav/internal/afile.txt/sub.txt"})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("move parent not a dir = %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	if err := os.WriteFile(filepath.Join(books, "b.txt"), []byte("B"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", map[string]string{
+		"Destination": "http://pb/dav/internal/Books/b.txt",
+		"Overwrite":   "F",
+	})
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("move no overwrite = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.txt", "", map[string]string{
+		"Destination": "http://pb/dav/internal/Books/b.txt",
+		"Overwrite":   "T",
+	})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("move overwrite = %d", rr.Code)
+	}
+	if data, err := os.ReadFile(filepath.Join(books, "b.txt")); err != nil || string(data) != "A" {
+		t.Fatalf("move overwrite content: %q %v", data, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(books, "c.txt"), []byte("C"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr = davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/c.txt", "", map[string]string{
+		"Destination": "http://pb/dav/sd/c.txt",
+	})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("move cross-volume = %d", rr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(books, "c.txt")); !os.IsNotExist(err) {
+		t.Fatalf("cross-volume src remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(sd, "c.txt")); err != nil || string(data) != "C" {
+		t.Fatalf("cross-volume dst: %q %v", data, err)
+	}
+}
+
+func TestRenameDAVSameFileVariants(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.txt")
+	dst := filepath.Join(dir, "dst.txt")
+
+	if err := renameDAVSameFile(src, src); err != nil {
+		t.Fatalf("same path = %v", err)
+	}
+
+	if err := renameDAVSameFile(filepath.Join(dir, "nope.txt"), dst); err == nil {
+		t.Fatal("missing src accepted")
+	}
+
+	if err := os.WriteFile(src, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "child.txt"), []byte("c"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameDAVSameFile(src, dst); err == nil {
+		t.Fatal("rename onto directory accepted")
+	}
+	if data, err := os.ReadFile(src); err != nil || string(data) != "content" {
+		t.Fatalf("rollback failed: %q %v", data, err)
+	}
+
+	if err := os.Remove(filepath.Join(dst, "child.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameDAVSameFile(src, dst); err != nil {
+		t.Fatalf("rename ok: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("src remains: %v", err)
+	}
+	if data, err := os.ReadFile(dst); err != nil || string(data) != "content" {
+		t.Fatalf("dst: %q %v", data, err)
+	}
+}

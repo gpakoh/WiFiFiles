@@ -472,3 +472,38 @@ func TestSystemStoragePathsAreProtectedAndHidden(t *testing.T) {
 		t.Fatal("nested user folder must remain visible")
 	}
 }
+
+func TestSettingsClearDefaultTarget(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	app, err := newApp(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.cfgMu.Lock()
+	app.cfg.DefaultTarget = "internal/Books"
+	app.cfgMu.Unlock()
+	if err := app.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	app.handleSettings(rr, httptest.NewRequest(http.MethodGet, "/settings", nil))
+	if !strings.Contains(rr.Body.String(), "internal/Books") {
+		t.Fatalf("settings page does not show default target:\n%s", rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader("action=clear_default_target"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	app.handleSettings(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("clear default target status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	app2, err := newApp(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app2.cfg.DefaultTarget != "" {
+		t.Fatalf("default target not cleared: %q", app2.cfg.DefaultTarget)
+	}
+}

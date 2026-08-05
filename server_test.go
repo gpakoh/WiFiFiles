@@ -647,3 +647,45 @@ func TestStopHTTPLockedWithLiveServer(t *testing.T) {
 		t.Fatal("mobile token path not removed")
 	}
 }
+
+func TestApplyServicesVariants(t *testing.T) {
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app, appDir: t.TempDir()}
+
+	app.cfg = Config{Username: "pb"}
+	sm.applyServices()
+	if sm.httpSrv != nil || sm.httpErr != "" || sm.ftpSrv != nil || sm.ftpErr != "" || sm.smbSrv != nil || sm.smbErr != "" {
+		t.Fatalf("all disabled: %+v", sm)
+	}
+
+	busy, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	app.cfg = Config{Username: "pb", HTTPEnabled: true, HTTPPort: busyPort}
+	sm.applyServices()
+	if sm.httpErr == "" || sm.httpSrv != nil {
+		t.Fatalf("http busy port: %+v", sm)
+	}
+
+	app.cfg = Config{Username: "pb", FTPEnabled: true, FTPPort: busyPort}
+	sm.applyServices()
+	if sm.ftpErr == "" || sm.ftpSrv != nil {
+		t.Fatalf("ftp busy port: %+v", sm)
+	}
+
+	app.cfg = Config{Username: "pb", SMBEnabled: true}
+	sm.applyServices()
+	if !strings.Contains(sm.smbErr, "password") {
+		t.Fatalf("smb no-hash should demand password: %+v", sm)
+	}
+
+	app.cfg = Config{Username: "pb"}
+	sm.applyServices()
+	if sm.httpErr != "" || sm.ftpErr != "" {
+		t.Fatalf("errors not cleared when disabled: %+v", sm)
+	}
+}

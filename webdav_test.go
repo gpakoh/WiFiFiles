@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1070,6 +1071,52 @@ func TestHandlePutVariants(t *testing.T) {
 	}
 }
 
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (failingReadCloser) Close() error             { return nil }
+
+func TestHandlePutMoreBranches(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.WriteFile(filepath.Join(internal, "file.txt"), []byte("f"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/x.txt", "x", map[string]string{"Content-Range": "bytes 0-1/2"})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("put with content-range = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/Books/nope.txt", "x", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("put missing parent = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/file.txt/x.txt", "x", nil)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("put parent is file = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, http.MethodPut, "http://pb/dav/internal/fresh.txt", "hello", nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("put new file = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(internal, "fresh.txt")); err != nil || string(data) != "hello" {
+		t.Fatalf("new file content: %q %v", data, err)
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "http://pb/dav/internal/fail.txt", failingReadCloser{})
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("pocketbook:650wifi")))
+	rr = httptest.NewRecorder()
+	dav.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("put failing body = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(internal, "fail.txt")); !os.IsNotExist(err) {
+		t.Fatal("failed put left a file behind")
+	}
+}
+
 func TestHandleCopyVariants(t *testing.T) {
 	dav, internal := newTestDAV(t)
 	books := filepath.Join(internal, "Books")
@@ -1348,5 +1395,107 @@ func TestCopyDAVPathErrBranches(t *testing.T) {
 	srcFile := filepath.Join(srcDir, "a.txt")
 	if err := copyDAVPath(srcFile, dstDir, -1, 0); err == nil {
 		t.Fatal("existing dst file accepted")
+	}
+}
+
+func TestDestinationDAVPathVariants(t *testing.T) {
+	base := httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+
+	req := httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	if _, err := destinationDAVPath(req); err == nil {
+		t.Fatal("empty destination accepted")
+	}
+
+	req = httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	req.Header.Set("Destination", "http://%zz")
+	if _, err := destinationDAVPath(req); err == nil {
+		t.Fatal("malformed url accepted")
+	}
+
+	req = httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	req.Header.Set("Destination", "http://otherhost/dav/x")
+	if _, err := destinationDAVPath(req); err == nil {
+		t.Fatal("foreign host accepted")
+	}
+
+	req = httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	req.Header.Set("Destination", "http://pb/dav")
+	if got, err := destinationDAVPath(req); err != nil || got != "/" {
+		t.Fatalf("dav root destination = %q %v", got, err)
+	}
+
+	req = httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	req.Header.Set("Destination", "http://pb/other/x")
+	if _, err := destinationDAVPath(req); err == nil {
+		t.Fatal("outside webdav accepted")
+	}
+
+	req = httptest.NewRequest("COPY", "http://pb/dav/internal/a.txt", nil)
+	req.Header.Set("Destination", "http://pb/dav/internal/Books/a.txt")
+	if got, err := destinationDAVPath(req); err != nil || got != "/internal/Books/a.txt" {
+		t.Fatalf("clean destination = %q %v", got, err)
+	}
+
+	_ = base
+}
+
+func TestStageDAVDestinationVariants(t *testing.T) {
+	root := t.TempDir()
+
+	stage, err := stageDAVDestination(filepath.Join(root, "missing"), true)
+	if err != nil || stage.Existed || stage.Backup != "" {
+		t.Fatalf("missing dst: stage=%+v err=%v", stage, err)
+	}
+
+	dst := filepath.Join(root, "target")
+	if err := os.WriteFile(dst, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageDAVDestination(dst, false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("no-overwrite existing dst err=%v", err)
+	}
+
+	stage, err = stageDAVDestination(dst, true)
+	if err != nil || !stage.Existed || stage.Backup == "" {
+		t.Fatalf("overwrite stage: %+v err=%v", stage, err)
+	}
+	if data, err := os.ReadFile(stage.Backup); err != nil || string(data) != "old" {
+		t.Fatalf("backup content: %q %v", data, err)
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Fatalf("dst still exists after staging: %v", err)
+	}
+	commitDAVDestination(stage)
+	if _, err := os.Stat(stage.Backup); !os.IsNotExist(err) {
+		t.Fatalf("backup not removed by commit: %v", err)
+	}
+
+	if _, err := stageDAVDestination(filepath.Join(root, "missing"), false); err != nil {
+		t.Fatalf("missing dst no-overwrite err=%v", err)
+	}
+}
+
+func TestHandleCopyMissingParentAndSymlinkSrc(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.WriteFile(filepath.Join(internal, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(internal, "a.txt"), filepath.Join(internal, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "COPY", "http://pb/dav/internal/a.txt", "", map[string]string{"Destination": "http://pb/dav/internal/Books/nope/x.txt"})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("copy missing dst parent = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/a.txt", "", map[string]string{"Destination": "http://pb/dav/internal/a.txt/x.txt"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("copy dst inside src = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/link.txt", "", map[string]string{"Destination": "http://pb/dav/internal/copied.txt"})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("copy symlink src = %d body=%s", rr.Code, rr.Body.String())
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -546,3 +548,94 @@ func TestNativeUpdateWrappers(t *testing.T) {
 		t.Errorf("wrapper state wrong: %s", data)
 	}
 }
+
+// updateTestISRGYR is the Let's Encrypt intermediate that signs *.github.io
+// (release-assets.githubusercontent.com). It is issued directly by the
+// embedded ISRG Root X1, so verifying it proves the bundled root is usable.
+const updateTestISRGYR = `-----BEGIN CERTIFICATE-----
+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
+-----END CERTIFICATE-----`
+
+func TestUpdateRootsPEM(t *testing.T) {
+	block, _ := pem.Decode([]byte(updateRootsPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatal("updateRootsPEM: not a PEM certificate")
+	}
+	root, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("updateRootsPEM: %v", err)
+	}
+	if root.Subject.CommonName != "ISRG Root X1" {
+		t.Errorf("unexpected root subject: %s", root.Subject.CommonName)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(updateRootsPEM)) {
+		t.Fatal("updateRootsPEM: failed to add to pool")
+	}
+	block, _ = pem.Decode([]byte(updateTestISRGYR))
+	yr, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("test intermediate: %v", err)
+	}
+	if _, err := yr.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+		t.Fatalf("bundled root does not verify the Let's Encrypt chain: %v", err)
+	}
+}
+
+func TestUpdateHTTPTransport(t *testing.T) {
+	tr := updateHTTPTransport()
+	if tr == nil || tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("updateHTTPTransport: missing TLS client config")
+	}
+	subjects := tr.TLSClientConfig.RootCAs.Subjects()
+	if len(subjects) == 0 {
+		t.Fatal("updateHTTPTransport: root pool is empty")
+	}
+	block, _ := pem.Decode([]byte(updateRootsPEM))
+	root, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range subjects {
+		if string(s) == string(root.RawSubject) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("updateHTTPTransport: bundled root missing from transport pool")
+	}
+}
+

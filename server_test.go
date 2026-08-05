@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -598,5 +599,51 @@ func TestReadLivePIDVariants(t *testing.T) {
 	pid, ok := readLivePID(dir)
 	if !ok || pid != os.Getpid() {
 		t.Fatalf("live pid = %d/%v", pid, ok)
+	}
+}
+
+func TestWriteManagerStatusVariants(t *testing.T) {
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app}
+	for _, cfg := range []Config{
+		{Username: "pb", HTTPEnabled: true, HTTPPort: 8080, FTPEnabled: true, FTPPort: 2121, SMBEnabled: true, InternalEnabled: true, SDEnabled: true},
+		{Username: "pb", SMBEnabled: true, InternalEnabled: false, SDEnabled: true},
+		{Username: "pb", HTTPEnabled: true, HTTPPort: 9999},
+		{Username: "pb"},
+	} {
+		app.cfg = cfg
+		writeManagerStatus(sm)
+	}
+}
+
+func TestStopHTTPLockedWithLiveServer(t *testing.T) {
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})}
+	go func() { _ = srv.Serve(ln) }()
+	sm.httpSrv = srv
+	sm.httpLn = ln
+	sm.httpPort = 8080
+
+	backup, berr := os.ReadFile(mobileTokenPath)
+	t.Cleanup(func() {
+		if berr == nil {
+			_ = os.WriteFile(mobileTokenPath, backup, 0600)
+		} else {
+			_ = os.Remove(mobileTokenPath)
+		}
+	})
+	_ = os.WriteFile(mobileTokenPath, []byte("[]"), 0600)
+
+	sm.stopHTTPLocked()
+	if sm.httpSrv != nil || sm.httpLn != nil || sm.httpPort != 0 {
+		t.Fatalf("http not cleared: %+v", sm)
+	}
+	if _, err := os.Stat(mobileTokenPath); !os.IsNotExist(err) {
+		t.Fatal("mobile token path not removed")
 	}
 }

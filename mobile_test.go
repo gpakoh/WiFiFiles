@@ -1305,3 +1305,136 @@ func TestReadMobileTokensVariants(t *testing.T) {
 		t.Fatal("garbage token file accepted")
 	}
 }
+
+func TestStrictMobileNameVariants(t *testing.T) {
+	for _, name := range []string{"book.fb2", "книга.pdf", "a b.txt", "a-b_c.txt"} {
+		if got, err := strictMobileName(name); err != nil || got != name {
+			t.Fatalf("valid %q = %q %v", name, got, err)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "a/b", "..\\x", "x\x00y", "  ", "dir/name"} {
+		if _, err := strictMobileName(name); err == nil {
+			t.Fatalf("invalid %q accepted", name)
+		}
+	}
+}
+
+func TestMobileEntriesVariants(t *testing.T) {
+	app := newTestAuthApp(t)
+	dir := t.TempDir()
+	if _, err := app.mobileEntries(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing dir accepted")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "Books"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "z.txt"), []byte("123"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".hidden"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "z.txt"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := app.mobileEntries(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	if entries[0].Name != "Books" || !entries[0].IsDir {
+		t.Fatalf("dir first = %+v", entries[0])
+	}
+	if entries[1].Name != "z.txt" || entries[1].Size == "" || entries[1].ModTime == "" {
+		t.Fatalf("file = %+v", entries[1])
+	}
+}
+
+func TestMobileReceiptDiskFallback(t *testing.T) {
+	app := newTestAuthApp(t)
+	backup, berr := os.ReadFile(mobileReceiptPath)
+	t.Cleanup(func() {
+		if berr == nil {
+			_ = os.WriteFile(mobileReceiptPath, backup, 0600)
+		} else {
+			_ = os.Remove(mobileReceiptPath)
+		}
+	})
+	app.mobileReceipts = make(map[string]map[string]MobileUploadResult)
+
+	if app.mobileUploadCount("tok") != 0 {
+		t.Fatal("count without file != 0")
+	}
+
+	store := mobileReceiptStore{Receipts: map[string]map[string]MobileUploadResult{
+		"tok": {"up1": {Status: "uploaded"}},
+	}}
+	data, _ := json.Marshal(store)
+	if err := os.WriteFile(mobileReceiptPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := app.mobileUploadCount("tok"); got != 1 {
+		t.Fatalf("count = %d", got)
+	}
+	if got, ok := app.getMobileReceipt("tok", "up1"); !ok || got.Status != "uploaded" {
+		t.Fatalf("receipt = %+v %v", got, ok)
+	}
+	if _, ok := app.getMobileReceipt("tok", "nope"); ok {
+		t.Fatal("missing upload id accepted")
+	}
+
+	app.saveMobileReceipt("tok", "up2", MobileUploadResult{Status: "uploaded"})
+	if got := app.mobileUploadCount("tok"); got != 2 {
+		t.Fatalf("saved count = %d", got)
+	}
+
+	if err := os.WriteFile(mobileReceiptPath, []byte("{bad"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app.mobileReceipts = nil
+	app.mobileReceipts = make(map[string]map[string]MobileUploadResult)
+	if app.mobileUploadCount("tok2") != 0 {
+		t.Fatal("count with garbage != 0")
+	}
+	if _, ok := app.getMobileReceipt("tok2", "x"); ok {
+		t.Fatal("receipt with garbage ok")
+	}
+}
+
+func TestMobileVisibleAndDeleteAll(t *testing.T) {
+	app := newTestAuthApp(t)
+	dir := t.TempDir()
+	for _, name := range []string{"b.txt", "a.txt", ".hidden"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "a.txt"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := mobileVisibleFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files[0].name != "a.txt" || files[1].name != "b.txt" {
+		t.Fatalf("visible = %+v", files)
+	}
+
+	deleted, err := app.deleteAllMobileFiles(dir)
+	if err != nil || deleted != 2 {
+		t.Fatalf("deleted = %d %v", deleted, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("a.txt remains")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".hidden")); err != nil {
+		t.Fatal(".hidden should remain")
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1190,5 +1191,162 @@ func TestDAVContentType(t *testing.T) {
 
 	if got := davContentType(davResource{Info: davRootInfo{}}); got != "httpd/unix-directory" {
 		t.Fatalf("dir type = %q", got)
+	}
+}
+
+func TestDigestHelpers(t *testing.T) {
+	parsed := parseDigestHeader("Digest username=\"pb\", realm=\"WiFiFiles\", qop=auth, nc=00000001")
+	if parsed["username"] != "pb" || parsed["realm"] != "WiFiFiles" || parsed["qop"] != "auth" || parsed["nc"] != "00000001" {
+		t.Fatalf("parsed = %+v", parsed)
+	}
+	if len(parseDigestHeader("Basic abc")) != 0 {
+		t.Fatal("non-digest accepted")
+	}
+	if len(parseDigestHeader("")) != 0 {
+		t.Fatal("empty accepted")
+	}
+	if got := parseDigestHeader("Digest =x"); len(got) != 0 {
+		t.Fatalf("eq-at-start = %+v", got)
+	}
+	if got := parseDigestHeader("Digest name=\"a\\\"b\""); got["name"] != `a"b` {
+		t.Fatalf("escaped = %q", got["name"])
+	}
+	if got := parseDigestHeader("Digest extra=\"v1\" trailing=no-comma"); got["trailing"] != "no-comma" {
+		t.Fatalf("trailing = %+v", got)
+	}
+}
+
+func TestDigestURIEquals(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://pb/dav/internal", nil)
+	if !digestURIEquals("/dav/internal", r) {
+		t.Fatal("RequestURI match failed")
+	}
+	if digestURIEquals("http://[bad", r) {
+		t.Fatal("bad url accepted")
+	}
+	if digestURIEquals("/dav/internal?x=1", r) {
+		t.Fatal("query mismatch accepted")
+	}
+	if !digestURIEquals("/dav/internal/", r) {
+		t.Fatal("trailing slash mismatch")
+	}
+
+	r = httptest.NewRequest("GET", "http://pb/dav/internal?x=1", nil)
+	if !digestURIEquals("/dav/internal/?x=1", r) {
+		t.Fatal("normalize with query failed")
+	}
+	if digestURIEquals("/dav/internal/?y=1", r) {
+		t.Fatal("query mismatch after normalize accepted")
+	}
+}
+
+func TestDigestAuthenticatedVariants(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	nonce := dav.newNonce()
+	cfg := dav.app.configSnapshot()
+	uri := "/dav/internal/Books"
+
+	mk := func(n string, extra string) *http.Request {
+		r := httptest.NewRequest("PROPFIND", "http://pb"+uri, nil)
+		r.Header.Set("Authorization", fmt.Sprintf("Digest username=%q, realm=%q, nonce=%q, uri=%q, %s", cfg.Username, davRealm, n, uri, extra))
+		return r
+	}
+
+	ha2 := md5Hex("PROPFIND:" + uri)
+	plain := fmt.Sprintf("response=%q", md5Hex(cfg.DAVDigestHA1+":"+nonce+":"+ha2))
+	qop := fmt.Sprintf("qop=auth, nc=00000001, cnonce=%q, response=%q", "abc", md5Hex(cfg.DAVDigestHA1+":"+nonce+":00000001:abc:auth:"+ha2))
+
+	if !dav.digestAuthenticated(mk(nonce, plain)) {
+		t.Fatal("valid plain digest rejected")
+	}
+	if !dav.digestAuthenticated(mk(nonce, qop)) {
+		t.Fatal("valid qop digest rejected")
+	}
+	if dav.digestAuthenticated(mk("unknown-nonce", plain)) {
+		t.Fatal("bad nonce accepted")
+	}
+	if dav.digestAuthenticated(mk(nonce, `response="deadbeef"`)) {
+		t.Fatal("bad response accepted")
+	}
+	if dav.digestAuthenticated(mk(nonce, "qop=auth, response=\""+md5Hex("x")+"\"")) {
+		t.Fatal("qop without nc accepted")
+	}
+
+	badUser := httptest.NewRequest("PROPFIND", "http://pb"+uri, nil)
+	badUser.Header.Set("Authorization", fmt.Sprintf("Digest username=%q, realm=%q, nonce=%q, uri=%q, %s", "other", davRealm, nonce, uri, plain))
+	if dav.digestAuthenticated(badUser) {
+		t.Fatal("username mismatch accepted")
+	}
+
+	badURI := httptest.NewRequest("PROPFIND", "http://pb"+uri, nil)
+	badURI.Header.Set("Authorization", fmt.Sprintf("Digest username=%q, realm=%q, nonce=%q, uri=%q, %s", cfg.Username, davRealm, nonce, "/dav/sd", plain))
+	if dav.digestAuthenticated(badURI) {
+		t.Fatal("uri mismatch accepted")
+	}
+
+	badRealm := httptest.NewRequest("PROPFIND", "http://pb"+uri, nil)
+	badRealm.Header.Set("Authorization", fmt.Sprintf("Digest username=%q, realm=%q, nonce=%q, uri=%q, %s", cfg.Username, "Other", nonce, uri, plain))
+	if dav.digestAuthenticated(badRealm) {
+		t.Fatal("realm mismatch accepted")
+	}
+}
+
+func TestDAVTimeoutAndClientAddress(t *testing.T) {
+	if got := davTimeout(""); got != time.Hour {
+		t.Fatalf("empty = %v", got)
+	}
+	if got := davTimeout("Infinite"); got != time.Hour {
+		t.Fatalf("infinite = %v", got)
+	}
+	if got := davTimeout("Second-30"); got != 30*time.Second {
+		t.Fatalf("30s = %v", got)
+	}
+	if got := davTimeout("Second-999999"); got != 24*time.Hour {
+		t.Fatalf("cap = %v", got)
+	}
+	if got := davTimeout("Second-0"); got != time.Hour {
+		t.Fatalf("zero = %v", got)
+	}
+	if got := davTimeout("Second-abc"); got != time.Hour {
+		t.Fatalf("bad = %v", got)
+	}
+	if got := davTimeout("Second-5, Infinite"); got != 5*time.Second {
+		t.Fatalf("multi = %v", got)
+	}
+
+	r := httptest.NewRequest("GET", "http://pb/dav", nil)
+	r.RemoteAddr = "10.0.0.5:1234"
+	if got := davClientAddress(r); got != "10.0.0.5" {
+		t.Fatalf("addr = %q", got)
+	}
+	r.RemoteAddr = "10.0.0.5"
+	if got := davClientAddress(r); got != "10.0.0.5" {
+		t.Fatalf("raw addr = %q", got)
+	}
+}
+
+func TestCopyDAVPathErrBranches(t *testing.T) {
+	base := t.TempDir()
+	srcDir := filepath.Join(base, "src")
+	dstDir := filepath.Join(base, "dst")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "a.txt"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyDAVPath(filepath.Join(base, "missing"), filepath.Join(base, "x"), -1, 0); err == nil {
+		t.Fatal("missing src accepted")
+	}
+	if err := copyDAVPath(srcDir, dstDir, -1, 0); err == nil {
+		t.Fatal("existing dst dir accepted")
+	}
+	srcFile := filepath.Join(srcDir, "a.txt")
+	if err := copyDAVPath(srcFile, dstDir, -1, 0); err == nil {
+		t.Fatal("existing dst file accepted")
 	}
 }

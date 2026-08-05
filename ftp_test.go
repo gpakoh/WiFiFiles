@@ -639,3 +639,69 @@ func TestFTPHelpersMultilineAndStripOptions(t *testing.T) {
 		t.Fatalf("strip lla = %q", got)
 	}
 }
+
+func TestFTPRetrieveSizeMdtmMkdirNegatives(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	full := filepath.Join(app.roots["internal"], "Books", "ok.txt")
+	if err := os.WriteFile(full, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := c.cmd("CWD internal/Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD: %q", got)
+	}
+
+	if got := c.cmd("RETR ."); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RETR dir = %q", got)
+	}
+	if got := c.cmd("RETR ok.txt"); !strings.HasPrefix(got, "425 ") {
+		t.Fatalf("RETR no pasv = %q", got)
+	}
+	if got := c.cmd("SIZE ."); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("SIZE dir = %q", got)
+	}
+	if got := c.cmd("SIZE nope.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("SIZE missing = %q", got)
+	}
+	if got := c.cmd("MDTM nope.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MDTM missing = %q", got)
+	}
+	if got := c.cmd("MKD ."); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MKD exists = %q", got)
+	}
+}
+
+func TestFTPRestStoreResume(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("CWD internal/Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD: %q", got)
+	}
+	if got := c.cmd("REST 3"); !strings.HasPrefix(got, "350 ") {
+		t.Fatalf("REST: %q", got)
+	}
+	data := c.passive(t)
+	defer data.Close()
+	if got := c.cmd("STOR resume.txt"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("STOR: %q", got)
+	}
+	if _, err := io.WriteString(data, "XYZ"); err != nil {
+		t.Fatal(err)
+	}
+	_ = data.Close()
+	if got := c.reply(); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("STOR end: %q", got)
+	}
+	content, err := os.ReadFile(filepath.Join(app.roots["internal"], "Books", "resume.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "\x00\x00\x00XYZ" {
+		t.Fatalf("resume content = %q", content)
+	}
+}

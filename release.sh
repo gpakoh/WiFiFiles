@@ -10,6 +10,6 @@ ZIP="$OUT/WiFiFiles_$VERSION.zip"
 rm -f "$ZIP"
 (cd "$OUT" && mkdir -p zip/app && cp -f WiFiFiles.app zip/app/WiFiFiles.app && cd zip && zip -qr "$ZIP" app && cd .. && rm -rf zip)
 SHA256SUM="${SHA256SUM:-sha256sum}"
-"$SHA256SUM" "$ZIP" > "$ZIP.sha256"
+"$SHA256SUM" "$ZIP" > "$OUT/WiFiFiles_$VERSION.sha256"
 echo "created $ZIP"
-cat "$ZIP.sha256"
+cat "$OUT/WiFiFiles_$VERSION.sha256"

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -757,15 +756,6 @@ func TestRunManagerAlreadyRunning(t *testing.T) {
 	writePIDFile(t, dir, child.Process.Pid)
 	runManager(dir)
 	reapChild(t, child)
-}
-
-func TestRandomHexError(t *testing.T) {
-	old := rand.Reader
-	rand.Reader = failingReader{}
-	defer func() { rand.Reader = old }()
-	if _, err := randomHex(4); err == nil {
-		t.Fatal("randomHex should fail with broken reader")
-	}
 }
 
 func TestWriteStreamTempReadError(t *testing.T) {

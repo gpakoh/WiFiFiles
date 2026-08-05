@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,58 @@ func newTestAuthApp(t *testing.T) *App {
 			SDEnabled:       true,
 		},
 		sessions: make(map[string]time.Time),
+	}
+}
+
+func TestSessionPersistenceAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions.json")
+
+	first := newTestAuthApp(t)
+	first.sessionPath = sessionPath
+	first.sessions["tok-a"] = time.Now().Add(time.Hour)
+	first.sessions["tok-expired"] = time.Now().Add(-time.Minute)
+	first.saveSessions()
+
+	second := newTestAuthApp(t)
+	second.sessionPath = sessionPath
+	second.loadSessions()
+	if !second.validSession("tok-a") {
+		t.Fatal("persisted session should survive restart")
+	}
+	if second.validSession("tok-expired") {
+		t.Fatal("expired session must not be restored")
+	}
+	if len(second.sessions) != 1 {
+		t.Fatalf("expected 1 restored session, got %d", len(second.sessions))
+	}
+}
+
+func TestSessionFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sessions.json")
+	app := newTestAuthApp(t)
+	app.sessionPath = sessionPath
+	app.sessions["tok"] = time.Now().Add(time.Hour)
+	app.saveSessions()
+	st, err := os.Stat(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0600 {
+		t.Fatalf("session file mode = %v, want 0600", st.Mode().Perm())
+	}
+}
+
+func TestNewAppSessionPathUsesConfigDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	a, err := newApp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Dir(path), "sessions.json")
+	if a.sessionPath != want {
+		t.Fatalf("sessionPath = %q, want %q", a.sessionPath, want)
 	}
 }
 

@@ -79,13 +79,15 @@ type Config struct {
 }
 
 type App struct {
-	cfgPath  string
-	cfgMu    sync.RWMutex
-	cfg      Config
-	sessions map[string]time.Time
-	sessMu   sync.Mutex
-	roots    map[string]string
-	tmpl     *template.Template
+	cfgPath         string
+	cfgMu           sync.RWMutex
+	cfg             Config
+	sessions        map[string]time.Time
+	sessionPath     string
+	lastSessionSave time.Time
+	sessMu          sync.Mutex
+	roots           map[string]string
+	tmpl            *template.Template
 
 	libraryMu      sync.Mutex
 	libraryTimer   *time.Timer
@@ -124,17 +126,17 @@ type MobileTokenRecord struct {
 }
 
 type PageData struct {
-	Version      string
-	Username     string
-	CurrentPath  string
-	ParentPath   string
-	Entries      []Entry
-	Error        string
-	Message      string
-	Roots        []string
-	Breadcrumbs  []Breadcrumb
-	Destinations []UploadDestination
-	FreeSpace    string
+	Version       string
+	Username      string
+	CurrentPath   string
+	ParentPath    string
+	Entries       []Entry
+	Error         string
+	Message       string
+	Roots         []string
+	Breadcrumbs   []Breadcrumb
+	Destinations  []UploadDestination
+	FreeSpace     string
 	DefaultTarget string
 }
 
@@ -653,6 +655,9 @@ func (sm *ServiceManager) shutdown() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_ = sm.control.Shutdown(ctx)
 		cancel()
+	}
+	if sm.app != nil {
+		sm.app.saveSessions()
 	}
 }
 
@@ -1621,6 +1626,11 @@ func newApp(cfgPath string) (*App, error) {
 		mobileTimers:   make(map[string]*time.Timer),
 		mobileReceipts: make(map[string]map[string]MobileUploadResult),
 	}
+	a.sessionPath = filepath.Join(runtimeDirPath, "sessions.json")
+	if cfgPath != persistentConfigPath {
+		a.sessionPath = filepath.Join(filepath.Dir(cfgPath), "sessions.json")
+	}
+	a.loadSessions()
 	if err := a.loadOrCreateConfig(); err != nil {
 		return nil, err
 	}
@@ -1833,6 +1843,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	a.sessMu.Lock()
 	a.sessions[token] = time.Now().Add(12 * time.Hour)
 	a.sessMu.Unlock()
+	a.saveSessions()
 	http.SetCookie(w, &http.Cookie{Name: "pbwf_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 43200})
 	http.Redirect(w, r, "/?k="+encodeVirtualPath(a.defaultRoot()), http.StatusSeeOther)
 }
@@ -1842,6 +1853,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		a.sessMu.Lock()
 		delete(a.sessions, c.Value)
 		a.sessMu.Unlock()
+		a.saveSessions()
 	}
 	http.SetCookie(w, &http.Cookie{Name: "pbwf_session", Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -2100,6 +2112,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	a.sessMu.Lock()
 	a.sessions = make(map[string]time.Time)
 	a.sessMu.Unlock()
+	a.saveSessions()
 	http.SetCookie(w, &http.Cookie{Name: "pbwf_session", Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }

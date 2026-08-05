@@ -904,3 +904,41 @@ func TestFTPRenameOntoDirAndDeleteDir(t *testing.T) {
 		t.Fatalf("RNTO onto dir should be 550: %q", got)
 	}
 }
+
+func TestFTPAcceptLoopListenerError(t *testing.T) {
+	root := t.TempDir()
+	app, err := newApp(filepath.Join(root, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewFTPServer(app, filepath.Join(root, "runtime"), 0)
+	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.ln = ln
+	srv.wg.Add(1)
+	go srv.acceptLoop()
+	time.Sleep(50 * time.Millisecond)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	close(srv.stopCh)
+	srv.wg.Wait()
+}
+
+func TestFTPAppendOntoDirectory(t *testing.T) {
+	_, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+	if got := c.cmd("CWD internal/Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD: %q", got)
+	}
+	if got := c.cmd("MKD ddir"); !strings.HasPrefix(got, "257 ") {
+		t.Fatalf("MKD ddir: %q", got)
+	}
+	if got := c.cmd("APPE ddir"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("APPE onto dir = %q", got)
+	}
+}

@@ -108,3 +108,17 @@ func TestRunPocketBookScannerLifecycle(t *testing.T) {
 	}
 	t.Fatal("scanner temp log not removed; goroutine did not finish")
 }
+
+func TestRunPocketBookScannerStartError(t *testing.T) {
+	ensureStorageMounts(t)
+	scannerDir := "/mnt/ext1/system/bin"
+	if err := os.MkdirAll(scannerDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir("/mnt/ext1/system")) })
+	if err := os.WriteFile(filepath.Join(scannerDir, "scanner.app"), []byte("not an ELF binary\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestWebApp(t)
+	a.runPocketBookScanner([]string{"/mnt/ext1/Books"})
+}

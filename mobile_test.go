@@ -949,6 +949,12 @@ func TestReadMultipartText(t *testing.T) {
 	}
 }
 
+func TestReadMultipartTextError(t *testing.T) {
+	if _, err := readMultipartText(failingReader{}, 100); err == nil {
+		t.Fatal("read error accepted")
+	}
+}
+
 func TestRawMobileUploadNegativeBranches(t *testing.T) {
 	app, token, books := prepareMobileTest(t, "safe")
 
@@ -1144,6 +1150,38 @@ func TestHandleMobileDeleteAndRenameNegatives(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(books, "a.epub")); err != nil || string(data) != "a" {
 		t.Fatalf("a.epub damaged: %q %v", data, err)
+	}
+
+	rr = post("/m/"+token+"/rename", url.Values{"old": {"../escape"}, "new": {"a.epub"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("rename bad old = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+	rr = post("/m/"+token+"/rename", url.Values{"old": {"a.epub"}, "new": {"sub/bad.epub"}})
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("rename bad new = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestHandleMobileListAndDeleteAllOnFileTarget(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+	if err := os.WriteFile(filepath.Join(books, "a.epub"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMobileTokens([]MobileTokenRecord{{Token: token, Target: "internal/Books/a.epub", Mode: "edit", Expires: time.Now().Add(time.Minute).Unix()}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/list", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("list on file target = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/m/"+token+"/delete-all", nil)
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "err") {
+		t.Fatalf("delete-all on file target = %d loc=%q", rr.Code, rr.Header().Get("Location"))
 	}
 }
 

@@ -1708,3 +1708,27 @@ func TestWebDAVCopyVariants(t *testing.T) {
 		t.Fatal("COPY onto itself succeeded")
 	}
 }
+
+func TestWebDAVMoveCrossVolume(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	src := filepath.Join(internal, "Books", "a.epub")
+	if err := os.MkdirAll(filepath.Dir(src), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr := davRequest(t, dav, "MOVE", "http://pb/dav/internal/Books/a.epub", "", map[string]string{
+		"Destination": "http://pb/dav/sd/b.epub",
+	})
+	if rr.Code != http.StatusCreated && rr.Code != http.StatusNoContent {
+		t.Fatalf("cross-volume MOVE = %d, want 2xx body=%s", rr.Code, rr.Body.String())
+	}
+	dst := filepath.Join(dav.app.roots["sd"], "b.epub")
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("destination missing after cross-volume MOVE: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source still present after cross-volume MOVE: %v", err)
+	}
+}

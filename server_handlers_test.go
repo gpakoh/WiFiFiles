@@ -502,3 +502,65 @@ func TestWriteNativeStateStoppedFallback(t *testing.T) {
 		t.Fatalf("state missing message line: %q", text)
 	}
 }
+
+func TestControlAuthBranches(t *testing.T) {
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("inner"))
+	})
+	h := sm.controlAuth(inner)
+
+	if ips := localIPv4s(); len(ips) > 0 {
+		req := httptest.NewRequest("POST", "http://pb/control", nil)
+		req.RemoteAddr = ips[0] + ":1234"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK || rr.Body.String() != "inner" {
+			t.Fatalf("own address = %d %q", rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest("POST", "http://pb/control", nil)
+	req.RemoteAddr = "10.99.99.99:1234"
+	req.SetBasicAuth("pocketbook", "wrong")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("bad creds = %d", rr.Code)
+	}
+	if rr.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("missing WWW-Authenticate")
+	}
+
+	req = httptest.NewRequest("POST", "http://pb/control", nil)
+	req.RemoteAddr = "10.99.99.99:1234"
+	req.SetBasicAuth("pocketbook", "650wifi")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || rr.Body.String() != "inner" {
+		t.Fatalf("good creds = %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+func TestMobileTargetLabelVariants(t *testing.T) {
+	if got := mobileTargetLabel("en", "internal/Books"); got != "Reader storage / Books" {
+		t.Fatalf("en internal = %q", got)
+	}
+	if got := mobileTargetLabel("ru", "sd/Books"); got != "Карта SD / Books" {
+		t.Fatalf("ru sd = %q", got)
+	}
+	if got := mobileTargetLabel("de", "/sd/Books"); got != "SD-Karte / Books" {
+		t.Fatalf("de sd trim = %q", got)
+	}
+	if got := mobileTargetLabel("fr", "internal"); got != "Mémoire du lecteur" {
+		t.Fatalf("fr internal = %q", got)
+	}
+	if got := mobileTargetLabel("en", "/"); got != "" {
+		t.Fatalf("root = %q", got)
+	}
+	if got := mobileTargetLabel("xx", "internal/Books"); got != "Память ридера / Books" {
+		t.Fatalf("default lang = %q", got)
+	}
+}

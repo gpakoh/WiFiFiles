@@ -1259,3 +1259,49 @@ func TestMobileUploadMultipartNegativeBranches(t *testing.T) {
 		t.Fatalf("non-multipart without name = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestReadMobileTokensVariants(t *testing.T) {
+	backup, backupErr := os.ReadFile(mobileTokenPath)
+	t.Cleanup(func() {
+		if backupErr == nil {
+			_ = os.WriteFile(mobileTokenPath, backup, 0600)
+		} else {
+			_ = os.Remove(mobileTokenPath)
+		}
+	})
+
+	if _, err := readMobileTokens(); err == nil {
+		t.Fatal("missing token file accepted")
+	}
+
+	if err := os.WriteFile(mobileTokenPath, []byte(`{"token":"single-token","expires":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readMobileTokens()
+	if err != nil || len(got) != 1 || got[0].Token != "single-token" {
+		t.Fatalf("single object = %+v err=%v", got, err)
+	}
+
+	recs := make([]MobileTokenRecord, 0, maxMobileTokens+5)
+	for i := 0; i < maxMobileTokens+5; i++ {
+		recs = append(recs, MobileTokenRecord{Token: fmt.Sprintf("tok-%d", i)})
+	}
+	data, _ := json.Marshal(recs)
+	if err := os.WriteFile(mobileTokenPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = readMobileTokens()
+	if err != nil || len(got) != maxMobileTokens {
+		t.Fatalf("capped = %d err=%v", len(got), err)
+	}
+	if got[0].Token != "tok-5" || got[len(got)-1].Token != fmt.Sprintf("tok-%d", maxMobileTokens+4) {
+		t.Fatalf("capped window = %s..%s", got[0].Token, got[len(got)-1].Token)
+	}
+
+	if err := os.WriteFile(mobileTokenPath, []byte("{bad json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readMobileTokens(); err == nil {
+		t.Fatal("garbage token file accepted")
+	}
+}

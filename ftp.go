@@ -249,6 +249,10 @@ func (s *ftpSession) multiline(code int, lines []string) {
 		s.reply(code, "")
 		return
 	}
+	if len(lines) == 1 {
+		s.reply(code, "%s", lines[0])
+		return
+	}
 	_, _ = fmt.Fprintf(s.rw, "%d-%s\r\n", code, lines[0])
 	for _, line := range lines[1 : len(lines)-1] {
 		_, _ = fmt.Fprintf(s.rw, "%s\r\n", line)

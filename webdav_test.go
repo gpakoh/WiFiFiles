@@ -1130,3 +1130,65 @@ func TestDAVUnusedPathErrors(t *testing.T) {
 		t.Fatal("unused path in missing parent accepted")
 	}
 }
+
+func TestNonceLifecycle(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	token := dav.newNonce()
+	if token == "" {
+		t.Fatal("empty nonce")
+	}
+	if !dav.validNonce(token) {
+		t.Fatal("fresh nonce rejected")
+	}
+	if dav.validNonce("unknown-nonce") {
+		t.Fatal("unknown nonce accepted")
+	}
+	dav.mu.Lock()
+	dav.nonces["expired-nonce"] = time.Now().Add(-time.Second)
+	dav.mu.Unlock()
+	if dav.validNonce("expired-nonce") {
+		t.Fatal("expired nonce accepted")
+	}
+	dav.mu.Lock()
+	dav.nonces["stale-nonce"] = time.Now().Add(-time.Second)
+	dav.mu.Unlock()
+	_ = dav.newNonce()
+	dav.mu.Lock()
+	_, stale := dav.nonces["stale-nonce"]
+	dav.mu.Unlock()
+	if stale {
+		t.Fatal("stale nonce not pruned by newNonce")
+	}
+}
+
+func TestDAVContentType(t *testing.T) {
+	dir := t.TempDir()
+	book := filepath.Join(dir, "a.epub")
+	if err := os.WriteFile(book, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	noext := filepath.Join(dir, "noext")
+	if err := os.WriteFile(noext, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(book)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := davContentType(davResource{Info: info}); got != "application/epub+zip" {
+		t.Fatalf("epub type = %q", got)
+	}
+
+	info, err = os.Stat(noext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := davContentType(davResource{Info: info}); got != "application/octet-stream" {
+		t.Fatalf("noext type = %q", got)
+	}
+
+	if got := davContentType(davResource{Info: davRootInfo{}}); got != "httpd/unix-directory" {
+		t.Fatalf("dir type = %q", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"testing"
 
 	smbntlm "github.com/sonroyaalmerol/go-smb-server/smb/ntlmssp"
@@ -254,5 +255,63 @@ func TestSMBServerHelpers(t *testing.T) {
 	other := friendlySMBListenError(4445, errors.New("boom"))
 	if other != "boom" {
 		t.Fatalf("friendly other = %q", other)
+	}
+}
+
+func TestSMBSetInfoVariants(t *testing.T) {
+	b, root := newTestSMB(t)
+	ctx := context.Background()
+	h, err := b.Open(ctx, smbvfs.OpenOptions{Path: "setinfo.txt", Disposition: smbvfs.DispositionOverwriteIf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(ctx)
+	if _, err := h.Write(ctx, 0, []byte("hello world")); err != nil {
+		t.Fatal(err)
+	}
+
+	eof := int64(5)
+	if err := h.(smbvfs.SetInfoer).SetInfo(ctx, &smbvfs.SetInfoRequest{EndOfFile: &eof}); err != nil {
+		t.Fatalf("SetInfo EOF = %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "setinfo.txt"))
+	if string(data) != "hello" {
+		t.Fatalf("truncated = %q", data)
+	}
+
+	now := time.Now()
+	if err := h.(smbvfs.SetInfoer).SetInfo(ctx, &smbvfs.SetInfoRequest{LastWriteTime: &now}); err != nil {
+		t.Fatalf("SetInfo time = %v", err)
+	}
+}
+
+func TestSMBEnumerateStopAndErrors(t *testing.T) {
+	b, root := newTestSMB(t)
+	ctx := context.Background()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h, err := b.Open(ctx, smbvfs.OpenOptions{Path: "", Disposition: smbvfs.DispositionOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close(ctx)
+
+	count := 0
+	for info, err := range h.Enumerate(ctx, "") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Name == "a.txt" {
+			break
+		}
+		count++
+	}
+
+	if _, err := b.Open(ctx, smbvfs.OpenOptions{Path: "missing", Disposition: smbvfs.DispositionOpen}); err == nil {
+		t.Fatal("open missing dir accepted")
 	}
 }

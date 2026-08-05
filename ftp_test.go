@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -588,5 +589,53 @@ func TestFTPRenameAndStoreNegatives(t *testing.T) {
 
 	if got := c.cmd("APPE internal/Books/nope/c.txt"); !strings.HasPrefix(got, "550 ") {
 		t.Fatalf("APPE missing parent: %q", got)
+	}
+}
+
+func TestFTPMLSTMissing(t *testing.T) {
+	_, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("MLST /nope.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MLST missing = %q", got)
+	}
+}
+
+func TestFTPHelpersMultilineAndStripOptions(t *testing.T) {
+	var buf bytes.Buffer
+	s := &ftpSession{rw: bufio.NewReadWriter(bufio.NewReader(&buf), bufio.NewWriter(&buf))}
+
+	s.multiline(250, nil)
+	if got := buf.String(); got != "250 \r\n" {
+		t.Fatalf("empty multiline = %q", got)
+	}
+
+	buf.Reset()
+	s.multiline(250, []string{"Only"})
+	if got := buf.String(); got != "250 Only\r\n" {
+		t.Fatalf("single multiline = %q", got)
+	}
+
+	buf.Reset()
+	s.multiline(250, []string{"A", "B", "C"})
+	if got := buf.String(); got != "250-A\r\nB\r\n250 C\r\n" {
+		t.Fatalf("triple multiline = %q", got)
+	}
+
+	if got := stripListOptions("-a -l"); got != "" {
+		t.Fatalf("strip all = %q", got)
+	}
+	if got := stripListOptions("-a internal/Books"); got != "internal/Books" {
+		t.Fatalf("strip keep path = %q", got)
+	}
+	if got := stripListOptions(""); got != "" {
+		t.Fatalf("strip empty = %q", got)
+	}
+	if got := stripListOptions("internal/Books"); got != "internal/Books" {
+		t.Fatalf("no options = %q", got)
+	}
+	if got := stripListOptions("-la"); got != "" {
+		t.Fatalf("strip lla = %q", got)
 	}
 }

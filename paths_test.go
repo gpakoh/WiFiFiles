@@ -32,6 +32,28 @@ func TestEncodeAndRequestVirtualPath(t *testing.T) {
 	}
 }
 
+func TestRequestVirtualPathFallbackAndUnescape(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://pb/?k=!!bad!!&p=internal/Books", nil)
+	if got := requestVirtualPath(req); got != "internal/Books" {
+		t.Fatalf("fallback k->p = %q", got)
+	}
+
+	req = httptest.NewRequest("GET", "http://pb/?p=internal%252FBooks", nil)
+	if got := requestVirtualPath(req); got != "internal/Books" {
+		t.Fatalf("double unescape = %q", got)
+	}
+
+	req = httptest.NewRequest("GET", "http://pb/?p=%25252e", nil)
+	if got := requestVirtualPath(req); got != "." {
+		t.Fatalf("triple unescape = %q", got)
+	}
+
+	req = httptest.NewRequest("GET", "http://pb/?p=%25252e%25252e", nil)
+	if got := requestVirtualPath(req); got != ".." {
+		t.Fatalf("triple unescape pair = %q", got)
+	}
+}
+
 func TestRedirectMsg(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://pb/?p=x", nil)
 	rr := httptest.NewRecorder()

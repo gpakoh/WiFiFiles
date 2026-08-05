@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -103,5 +107,155 @@ func TestHandleUploadNegativeBranches(t *testing.T) {
 	app.handleUpload(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("traversal name = %d, want 400", rr.Code)
+	}
+}
+
+func multipartUploadBody(t *testing.T, fields map[string]string, files []string) (*bytes.Buffer, string) {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range files {
+		part, err := mw.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(part, "content-"+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &body, mw.FormDataContentType()
+}
+
+func uploadLocationMsg(rr *httptest.ResponseRecorder) string {
+	loc := rr.Header().Get("Location")
+	u, err := url.Parse(loc)
+	if err != nil {
+		return loc
+	}
+	msg, _ := url.QueryUnescape(u.Query().Get("msg"))
+	return msg
+}
+
+func TestHandleUploadSuccessAndDuplicates(t *testing.T) {
+	app := newTestWebApp(t)
+	internal := t.TempDir()
+	app.roots["internal"] = internal
+	app.roots["sd"] = t.TempDir()
+
+	post := func(body *bytes.Buffer, ct, url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", url, body)
+		req.Header.Set("Content-Type", ct)
+		rr := httptest.NewRecorder()
+		app.handleUpload(rr, req)
+		return rr
+	}
+
+	body, ct := multipartUploadBody(t, map[string]string{"target": "internal"}, []string{"book.fb2"})
+	rr := post(body, ct, "/upload")
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("success = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if msg := uploadLocationMsg(rr); !strings.Contains(msg, "Загрузка завершена") {
+		t.Fatalf("success msg = %q", msg)
+	}
+	if data, err := os.ReadFile(filepath.Join(internal, "book.fb2")); err != nil || string(data) != "content-book.fb2" {
+		t.Fatalf("uploaded file: %q %v", data, err)
+	}
+
+	body, ct = multipartUploadBody(t, map[string]string{"target": "internal"}, []string{"a.fb2", "a.fb2"})
+	rr = post(body, ct, "/upload")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(uploadLocationMsg(rr), "несколько раз") {
+		t.Fatalf("dup = %d msg=%q", rr.Code, uploadLocationMsg(rr))
+	}
+
+	body, ct = multipartUploadBody(t, map[string]string{"target": "internal"}, []string{"book.fb2"})
+	rr = post(body, ct, "/upload")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(uploadLocationMsg(rr), "уже существует") {
+		t.Fatalf("exists = %d msg=%q", rr.Code, uploadLocationMsg(rr))
+	}
+
+	body, ct = multipartUploadBody(t, map[string]string{"target": "internal", "overwrite": "1"}, []string{"book.fb2"})
+	rr = post(body, ct, "/upload")
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("overwrite = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(internal, "book.fb2")); err != nil || string(data) != "content-book.fb2" {
+		t.Fatalf("overwritten file: %q %v", data, err)
+	}
+}
+
+func TestEnsureRequestUploadSpaceVariants(t *testing.T) {
+	dir := t.TempDir()
+	if err := ensureRequestUploadSpace(dir, 1024); err != nil {
+		t.Fatalf("enough space = %v", err)
+	}
+	if err := ensureRequestUploadSpace(dir, -1); err != nil {
+		t.Fatalf("non-positive = %v", err)
+	}
+	if err := ensureRequestUploadSpace(filepath.Join(dir, "missing"), 100); err == nil {
+		t.Fatal("missing dir accepted")
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
+
+func TestWriteStreamTempVariants(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := writeStreamTemp(filepath.Join(dir, "missing"), strings.NewReader("x")); err == nil {
+		t.Fatal("missing parent accepted")
+	}
+	if _, _, err := writeStreamTemp(dir, failingReader{}); err == nil {
+		t.Fatal("failing reader accepted")
+	}
+	tmp, n, err := writeStreamTemp(dir, strings.NewReader("hello"))
+	if err != nil || n != 5 {
+		t.Fatalf("stream = %q %d %v", tmp, n, err)
+	}
+	defer os.Remove(tmp)
+	data, _ := os.ReadFile(tmp)
+	if string(data) != "hello" {
+		t.Fatalf("stream content = %q", data)
+	}
+}
+
+func TestCommitTempAutoRenameVariants(t *testing.T) {
+	dir := t.TempDir()
+	tmp, _, err := writeStreamTemp(dir, strings.NewReader("a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := commitTempAutoRename(dir, "book.txt", tmp)
+	if err != nil || name != "book.txt" {
+		t.Fatalf("rename = %q %v", name, err)
+	}
+
+	tmp2, _, _ := writeStreamTemp(dir, strings.NewReader("b"))
+	name, err = commitTempAutoRename(dir, "book.txt", tmp2)
+	if err != nil || name != "book (1).txt" {
+		t.Fatalf("conflict rename = %q %v", name, err)
+	}
+
+	other := t.TempDir()
+	tmp3, _, _ := writeStreamTemp(other, strings.NewReader("c"))
+	name, err = commitTempAutoRename(dir, "new.txt", tmp3)
+	if err != nil || name != "new.txt" {
+		t.Fatalf("cross-dir rename = %q %v", name, err)
+	}
+}
+
+func TestWriteMultipartTempOpenError(t *testing.T) {
+	hdr := &multipart.FileHeader{Filename: "x.txt"}
+	if _, err := writeMultipartTemp(t.TempDir(), hdr); err == nil {
+		t.Fatal("open without parsed tmpfile accepted")
 	}
 }

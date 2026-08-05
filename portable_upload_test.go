@@ -243,6 +243,46 @@ func TestHandleUploadMoreBranches(t *testing.T) {
 	}
 }
 
+func TestSaveUploadVariants(t *testing.T) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("files", "book.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, "data"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if err := req.ParseMultipartForm(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	hdr := req.MultipartForm.File["files"][0]
+	dir := t.TempDir()
+
+	hdr.Filename = ".."
+	if err := saveUpload(dir, hdr, false); err == nil {
+		t.Fatal("dotdot name accepted")
+	}
+
+	hdr.Filename = "ok.fb2"
+	if err := saveUpload(dir, hdr, true); err != nil {
+		t.Fatalf("saveUpload ok: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(dir, "conflict.fb2"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	hdr.Filename = "conflict.fb2"
+	if err := saveUpload(dir, hdr, true); err == nil {
+		t.Fatal("rename onto dir should fail")
+	}
+}
+
 func TestEnsureRequestUploadSpaceVariants(t *testing.T) {
 	dir := t.TempDir()
 	if err := ensureRequestUploadSpace(dir, 1024); err != nil {

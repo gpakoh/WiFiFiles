@@ -816,3 +816,41 @@ func TestFTPRestStoreResume(t *testing.T) {
 		t.Fatalf("resume content = %q", content)
 	}
 }
+
+func TestFTPStoreAndDirOpBranches(t *testing.T) {
+	_, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("STOR /nope/x.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("STOR bad path = %q", got)
+	}
+
+	data := c.passive(t)
+	if got := c.cmd("STOR /internal/Books"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("STOR dir 150 = %q", got)
+	}
+	if _, err := io.WriteString(data, "data"); err != nil {
+		t.Fatal(err)
+	}
+	_ = data.Close()
+	if got := c.reply(); !strings.HasPrefix(got, "451 ") {
+		t.Fatalf("STOR onto dir = %q", got)
+	}
+
+	if got := c.cmd("MKD /nope"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MKD bad path = %q", got)
+	}
+	if got := c.cmd("RMD /nope"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RMD bad path = %q", got)
+	}
+	if got := c.cmd("RNFR /internal/missing.fb2"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RNFR missing = %q", got)
+	}
+	if got := c.cmd("SIZE /nope/x"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("SIZE bad path = %q", got)
+	}
+	if got := c.cmd("MDTM /nope/x"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MDTM bad path = %q", got)
+	}
+}

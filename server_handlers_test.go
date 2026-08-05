@@ -216,6 +216,125 @@ func TestHandleMkdirAndDelete(t *testing.T) {
 	}
 }
 
+func TestHandleWebRenderBranches(t *testing.T) {
+	app := newTestWebApp(t)
+	internal := t.TempDir()
+	sd := t.TempDir()
+	app.roots["internal"] = internal
+	app.roots["sd"] = sd
+	h := app.routes()
+	token := "handlers-render-token"
+	app.sessMu.Lock()
+	app.sessions[token] = time.Now().Add(time.Hour)
+	app.sessMu.Unlock()
+	cookie := &http.Cookie{Name: "pbwf_session", Value: token}
+	get := func(url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", url, nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// handleLogin: method not allowed
+	req := httptest.NewRequest("PUT", "/login", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT /login = %d", rec.Code)
+	}
+
+	// handleIndex: bad path -> renderIndex falls back to defaultRoot
+	rec = get("/?k=" + encodeVirtualPath("nope/x"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bad path index = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// renderIndex: sort dirs-first, hidden file skipped
+	for _, f := range []string{"book.fb2", "wififiles.log"} {
+		if err := os.WriteFile(filepath.Join(internal, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{"zeta", "Alpha"} {
+		if err := os.MkdirAll(filepath.Join(internal, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec = get("/?p=internal")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "book.fb2") || strings.Contains(rec.Body.String(), "wififiles.log") {
+		t.Fatalf("index list = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "zeta") || !strings.Contains(rec.Body.String(), "Alpha") {
+		t.Fatalf("index dirs missing")
+	}
+
+	// renderIndex: sd root listed when sd enabled and exists
+	app.cfgMu.Lock()
+	app.cfg.SDEnabled = true
+	app.cfgMu.Unlock()
+	rec = get("/?p=internal")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Карта SD") {
+		t.Fatalf("sd root = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// renderIndex: ReadDir err
+	app.roots["internal"] = filepath.Join(t.TempDir(), "missing")
+	rec = get("/?p=internal")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "failed to read folder") {
+		t.Fatalf("readdir err = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// handleMkdir: invalid name
+	app.roots["internal"] = internal
+	req = httptest.NewRequest("POST", "/mkdir", strings.NewReader("p=internal&name=."))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("mkdir dot = %d", rec.Code)
+	}
+
+	// handleMkdir: existing dir -> redirect error
+	if err := os.MkdirAll(filepath.Join(internal, "dup"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest("POST", "/mkdir", strings.NewReader("p=internal&name=dup"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "failed+to+create") {
+		t.Fatalf("mkdir dup = %d loc=%q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	// enabledRoot: unknown volume default branch
+	if app.enabledRoot("nope") {
+		t.Fatal("enabledRoot(nope) = true")
+	}
+	if !app.enabledRoot("internal") {
+		t.Fatal("enabledRoot(internal) = false")
+	}
+
+	// handleDelete: protected path is rejected by resolvePath -> 400
+	req = httptest.NewRequest("POST", "/delete", strings.NewReader("p=internal/wififiles.log"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete protected = %d", rec.Code)
+	}
+	req = httptest.NewRequest("GET", "/delete", nil)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /delete = %d", rec.Code)
+	}
+}
+
 func TestHandleInfo(t *testing.T) {
 	app := newTestAuthApp(t)
 	req := httptest.NewRequest("GET", "/info", nil)

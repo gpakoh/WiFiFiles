@@ -135,3 +135,44 @@ func TestActivityTrLanguages(t *testing.T) {
 	}
 }
 
+func TestActivityDefaultsNoClockInjected(t *testing.T) {
+	var a activityState
+	a.noteClient("10.0.0.9")
+	a.addEvent("ev")
+	a.addUpload()
+	if got := a.snapshotCount(); got != 1 {
+		t.Fatalf("expected 1 active client with default clock, got %d", got)
+	}
+}
+
+func TestActivityEmptyInputsNoop(t *testing.T) {
+	var a activityState
+	tm := time.Unix(1_700_000_000, 0)
+	a.now = func() time.Time { return tm }
+	a.noteClient("")
+	a.addEvent("")
+	a.addDelete()
+	if got := a.snapshotCount(); got != 0 {
+		t.Fatalf("empty noteClient created a client: %d", got)
+	}
+	_, _, _, recent := a.snapshot()
+	if recent != "" {
+		t.Fatalf("empty addEvent added a log entry: %q", recent)
+	}
+}
+
+func TestActivitySyncMissingStateFile(t *testing.T) {
+	dir := t.TempDir()
+	var a activityState
+	tm := time.Unix(1_700_000_000, 0)
+	a.now = func() time.Time {
+		tm = tm.Add(3 * time.Second)
+		return tm
+	}
+	a.setPath(filepath.Join(dir, "missing", "native_state.ini"))
+	a.addUpload()
+	time.Sleep(150 * time.Millisecond)
+	if got := a.snapshotCount(); got != 0 {
+		t.Fatalf("unexpected clients: %d", got)
+	}
+}

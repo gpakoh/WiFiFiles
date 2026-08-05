@@ -170,6 +170,52 @@ func TestVerifyAppFileCorruptFooter(t *testing.T) {
 	}
 }
 
+func TestVerifyAppFilePayloadSizeOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "small.app")
+	footer := make([]byte, updateEmbedFooterLen)
+	copy(footer, updateEmbedMagic)
+	binary.LittleEndian.PutUint32(footer[8:12], 0)
+	binary.LittleEndian.PutUint32(footer[12:16], 0^0xA55AA55A)
+	data := append([]byte{0x7f, 'E', 'L', 'F'}, footer...)
+	if err := os.WriteFile(p, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAppFile(p); err == nil {
+		t.Error("payload size below minimum accepted")
+	}
+}
+
+func TestVerifyAppFilePayloadOffsetInvalid(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "offset.app")
+	footer := make([]byte, updateEmbedFooterLen)
+	copy(footer, updateEmbedMagic)
+	payloadSize := uint32(updateMinPayload)
+	binary.LittleEndian.PutUint32(footer[8:12], payloadSize)
+	binary.LittleEndian.PutUint32(footer[12:16], payloadSize^0xA55AA55A)
+	data := append([]byte{0x7f, 'E', 'L', 'F'}, footer...)
+	if err := os.WriteFile(p, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAppFile(p); err == nil {
+		t.Error("payload offset beyond file size accepted")
+	}
+}
+
+func TestResolveAppTargetSkipsEntries(t *testing.T) {
+	saveGlobals(t)
+	apps := t.TempDir()
+	updateAppsDirVar = apps
+	if err := os.Mkdir(filepath.Join(apps, "subdir"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeApp(t, filepath.Join(apps, "other.bin"))
+	if _, err := resolveAppTarget(); err == nil {
+		t.Error("only a subdir and a non-app file should not resolve")
+	}
+}
+
 func TestFindAssetURL(t *testing.T) {
 	rel := updateRelease{Assets: []updateAsset{
 		{Name: "WiFiFiles_0.7.26.zip", BrowserDownloadURL: "https://x/zip"},
@@ -238,6 +284,13 @@ func TestDownloadToFile(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		case "/huge":
 			fmt.Fprint(w, strings.Repeat("x", 100))
+		case "/chunked":
+			for i := 0; i < 30; i++ {
+				if _, err := w.Write([]byte("0123456789")); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -257,6 +310,9 @@ func TestDownloadToFile(t *testing.T) {
 	}
 	if err := downloadToFile(srv.URL+"/huge", dst, 10); err == nil {
 		t.Error("oversize should fail")
+	}
+	if err := downloadToFile(srv.URL+"/chunked", dst, 100); err == nil {
+		t.Error("chunked body over limit should fail")
 	}
 }
 
@@ -290,6 +346,10 @@ func TestExtractAppFromZip(t *testing.T) {
 	os.WriteFile(corrupt, []byte("not a zip"), 0644)
 	if err := extractAppFromZip(corrupt, dst); err == nil {
 		t.Error("corrupt zip should fail")
+	}
+	badDst := filepath.Join(dir, "no", "such", "dir", "out.app")
+	if err := extractAppFromZip(zipPath, badDst); err == nil {
+		t.Error("unwritable destination should fail")
 	}
 }
 
@@ -336,6 +396,33 @@ func TestInstallAppFile(t *testing.T) {
 	}
 	if err := installAppFile(newApp, filepath.Join(dir, "no", "such", "dir.app")); err == nil {
 		t.Error("missing target dir should fail")
+	}
+}
+
+func TestInstallAppFileInvalidApp(t *testing.T) {
+	dir := t.TempDir()
+	newApp := filepath.Join(dir, "new.app")
+	if err := os.WriteFile(newApp, []byte("not an app"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installAppFile(newApp, filepath.Join(dir, "out.app")); err == nil {
+		t.Error("invalid app should fail verification")
+	}
+}
+
+func TestInstallAppFileRenameFail(t *testing.T) {
+	dir := t.TempDir()
+	newApp := filepath.Join(dir, "new.app")
+	writeFakeApp(t, newApp)
+	target := filepath.Join(dir, "target.app")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := installAppFile(newApp, target); err == nil {
+		t.Error("rename onto directory should fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".WiFiFiles.app.new")); err == nil {
+		t.Error("tmp file not removed after failed rename")
 	}
 }
 
@@ -549,6 +636,22 @@ func TestNativeUpdateWrappers(t *testing.T) {
 	}
 }
 
+func TestNativeUpdateWrappersErrors(t *testing.T) {
+	saveGlobals(t)
+	appDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	updateAPIBaseURL = srv.URL
+	nativeUpdateCheck(appDir)
+	nativeUpdateInstall(appDir)
+	data, _ := os.ReadFile(updateStatusVar)
+	if !strings.Contains(string(data), "status=error") {
+		t.Errorf("wrapper error state wrong: %s", data)
+	}
+}
+
 // updateTestISRGYR is the Let's Encrypt intermediate that signs *.github.io
 // (release-assets.githubusercontent.com). It is issued directly by the
 // embedded ISRG Root X1, so verifying it proves the bundled root is usable.
@@ -681,5 +784,3 @@ func TestDownloadToFileOpenError(t *testing.T) {
 		t.Error("unwritable destination should fail")
 	}
 }
-
-

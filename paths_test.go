@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -236,5 +237,33 @@ func TestCommitTempAutoRenameStatError(t *testing.T) {
 	longName := strings.Repeat("a", 300) + ".txt"
 	if _, err := commitTempAutoRename(dir, longName, filepath.Join(dir, "src")); err == nil {
 		t.Fatal("Stat on too-long name should fail")
+	}
+}
+
+func TestCommitTempAutoRenameRenameError(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "missing-src.part")
+	if _, err := commitTempAutoRename(dir, "book.fb2", src); err == nil {
+		t.Fatal("Rename of missing temp should fail")
+	}
+}
+
+func TestCommitTempAutoRenameTooMany(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 10000; i++ {
+		name := "doc.txt"
+		if i > 0 {
+			name = fmt.Sprintf("doc (%d).txt", i)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := filepath.Join(dir, "src.part")
+	if err := os.WriteFile(src, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := commitTempAutoRename(dir, "doc.txt", src); err == nil {
+		t.Fatal("10k colliding names should fail")
 	}
 }

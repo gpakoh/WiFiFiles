@@ -283,6 +283,37 @@ func TestSaveSessionsMkdirFailure(t *testing.T) {
 	}
 }
 
+func TestSaveSessionsWriteFileFailure(t *testing.T) {
+	app := newTestAuthApp(t)
+	dir := t.TempDir()
+	app.sessionPath = filepath.Join(dir, "sessions.json")
+	if err := os.Mkdir(app.sessionPath+".tmp", 0700); err != nil {
+		t.Fatal(err)
+	}
+	app.sessions["tok"] = time.Now().Add(time.Hour)
+	app.saveSessionsLocked()
+	if !app.lastSessionSave.IsZero() {
+		t.Fatal("failed WriteFile should not record lastSessionSave")
+	}
+}
+
+func TestSaveSessionsRenameFailure(t *testing.T) {
+	app := newTestAuthApp(t)
+	dir := t.TempDir()
+	app.sessionPath = filepath.Join(dir, "sessions.json")
+	if err := os.Mkdir(app.sessionPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	app.sessions["tok"] = time.Now().Add(time.Hour)
+	app.saveSessionsLocked()
+	if !app.lastSessionSave.IsZero() {
+		t.Fatal("failed Rename should not record lastSessionSave")
+	}
+	if _, err := os.Stat(app.sessionPath + ".tmp"); err == nil {
+		t.Fatal("tmp file not removed after failed Rename")
+	}
+}
+
 func TestRandomHex(t *testing.T) {
 	for _, n := range []int{0, 4, 16} {
 		got, err := randomHex(n)
@@ -341,4 +372,3 @@ func TestLoadSessionsRestoresLiveOnly(t *testing.T) {
 		t.Fatal("expired session restored")
 	}
 }
-

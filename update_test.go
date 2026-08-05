@@ -639,3 +639,47 @@ func TestUpdateHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestSha256File(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.bin")
+	want := sha256.Sum256([]byte("hello update"))
+	if err := os.WriteFile(p, []byte("hello update"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sha256File(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != hex.EncodeToString(want[:]) {
+		t.Errorf("sha256File = %s, want %s", got, hex.EncodeToString(want[:]))
+	}
+
+	if _, err := sha256File(filepath.Join(dir, "missing.bin")); err == nil {
+		t.Error("sha256File on missing file should fail")
+	}
+}
+
+func TestDownloadToFileContentLength(t *testing.T) {
+	payload := []byte("x")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		w.Write(payload)
+	}))
+	defer srv.Close()
+	if err := downloadToFile(srv.URL, filepath.Join(t.TempDir(), "d"), 100); err == nil {
+		t.Error("ContentLength larger than body should fail")
+	}
+}
+
+func TestDownloadToFileOpenError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("data"))
+	}))
+	defer srv.Close()
+	dst := filepath.Join(t.TempDir(), "no", "such", "dir", "d")
+	if err := downloadToFile(srv.URL, dst, 100); err == nil {
+		t.Error("unwritable destination should fail")
+	}
+}
+
+

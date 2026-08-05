@@ -116,3 +116,22 @@ func (a *activityState) snapshotCount() int {
 	defer a.mu.Unlock()
 	return a.activeConnectionsLocked()
 }
+
+func TestActivityTrLanguages(t *testing.T) {
+	cases := []struct {
+		lang, want string
+	}{
+		{"ru", "подключение"},
+		{"fr", "connexion"},
+		{"de", "Verbindung"},
+		{"en", "connection"},
+		{"xx", "connection"},
+		{"", "connection"},
+	}
+	for _, c := range cases {
+		if got := tr(c.lang, "подключение", "connection", "connexion", "Verbindung"); got != c.want {
+			t.Errorf("tr(%q) = %q, want %q", c.lang, got, c.want)
+		}
+	}
+}
+

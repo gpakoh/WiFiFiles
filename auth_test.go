@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -230,3 +232,113 @@ func TestTestListenPort(t *testing.T) {
 		t.Fatalf("occupied port reported available: %s", reason)
 	}
 }
+
+func TestSaveSessionsNoopWithoutPath(t *testing.T) {
+	app := newTestAuthApp(t)
+	app.sessions["tok"] = time.Now().Add(time.Hour)
+	app.saveSessionsLocked()
+	if len(app.sessions) != 1 {
+		t.Fatalf("session map changed: %d", len(app.sessions))
+	}
+}
+
+func TestSaveSessionsFiltersExpired(t *testing.T) {
+	dir := t.TempDir()
+	app := newTestAuthApp(t)
+	app.sessionPath = filepath.Join(dir, "sessions.json")
+	app.sessions["live"] = time.Now().Add(time.Hour)
+	app.sessions["expired"] = time.Now().Add(-time.Minute)
+	app.saveSessionsLocked()
+
+	data, err := os.ReadFile(app.sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]int64
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stored["expired"]; ok {
+		t.Fatal("expired session persisted")
+	}
+	if _, ok := stored["live"]; !ok {
+		t.Fatal("live session missing from persisted file")
+	}
+}
+
+func TestSaveSessionsMkdirFailure(t *testing.T) {
+	app := newTestAuthApp(t)
+	parent := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(parent, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app.sessionPath = filepath.Join(parent, "sub", "sessions.json")
+	app.sessions["tok"] = time.Now().Add(time.Hour)
+	app.saveSessionsLocked()
+	if !app.lastSessionSave.IsZero() {
+		t.Fatal("failed save should not record lastSessionSave")
+	}
+	if _, err := os.Stat(app.sessionPath); err == nil {
+		t.Fatal("session file written despite MkdirAll failure")
+	}
+}
+
+func TestRandomHex(t *testing.T) {
+	for _, n := range []int{0, 4, 16} {
+		got, err := randomHex(n)
+		if err != nil {
+			t.Fatalf("randomHex(%d): %v", n, err)
+		}
+		if len(got) != 2*n {
+			t.Fatalf("randomHex(%d) length = %d, want %d", n, len(got), 2*n)
+		}
+		if _, err := hex.DecodeString(got); err != nil {
+			t.Fatalf("randomHex(%d) not hex: %v", n, err)
+		}
+	}
+}
+
+func TestLoadSessionsMissingFile(t *testing.T) {
+	app := newTestAuthApp(t)
+	app.sessionPath = filepath.Join(t.TempDir(), "nope", "sessions.json")
+	app.loadSessions()
+	if len(app.sessions) != 0 {
+		t.Fatalf("sessions loaded from missing file: %d", len(app.sessions))
+	}
+}
+
+func TestLoadSessionsCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	if err := os.WriteFile(path, []byte("not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestAuthApp(t)
+	app.sessionPath = path
+	app.loadSessions()
+	if len(app.sessions) != 0 {
+		t.Fatalf("sessions loaded from corrupt file: %d", len(app.sessions))
+	}
+}
+
+func TestLoadSessionsRestoresLiveOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	data, _ := json.Marshal(map[string]int64{
+		"live":    time.Now().Add(time.Hour).Unix(),
+		"expired": time.Now().Add(-time.Minute).Unix(),
+	})
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestAuthApp(t)
+	app.sessionPath = path
+	app.loadSessions()
+	if _, ok := app.sessions["live"]; !ok {
+		t.Fatal("live session not restored")
+	}
+	if _, ok := app.sessions["expired"]; ok {
+		t.Fatal("expired session restored")
+	}
+}
+

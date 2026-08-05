@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIsBookFile(t *testing.T) {
@@ -73,4 +74,37 @@ func TestFindPocketBookExecutable(t *testing.T) {
 	if got := findPocketBookExecutable(filepath.Join(root, "missing.app")); got != "" {
 		t.Fatalf("missing path resolved to %q", got)
 	}
+}
+
+func scanTempLogs() []string {
+	matches, _ := filepath.Glob("/tmp/wififiles-library-scan-*")
+	return matches
+}
+
+func TestRunPocketBookScannerLifecycle(t *testing.T) {
+	requireMntExt1Writable(t)
+	scannerDir := "/mnt/ext1/system/bin"
+	if err := os.MkdirAll(scannerDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf 'Scan finished\\n'\nexec sleep 60\n"
+	if err := os.WriteFile(filepath.Join(scannerDir, "scanner.app"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newTestWebApp(t)
+	before := len(scanTempLogs())
+	app.runPocketBookScanner([]string{"/mnt/ext1/Books"})
+	if after := len(scanTempLogs()); after != before+1 {
+		t.Fatalf("scanner temp log not created: before=%d after=%d", before, after)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(scanTempLogs()) == before {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("scanner temp log not removed; goroutine did not finish")
 }

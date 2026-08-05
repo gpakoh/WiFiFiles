@@ -25,3 +25,14 @@ func TestQRVersion5L(t *testing.T) {
 		t.Fatalf("unexpected matrix hash: %s", got)
 	}
 }
+
+func TestQRVersion5LTooLong(t *testing.T) {
+	if rows, err := qrVersion5L(strings.Repeat("a", 107)); err == nil {
+		t.Fatalf("107-byte payload accepted, rows=%d", len(rows))
+	}
+	if rows, err := qrVersion5L(strings.Repeat("a", 106)); err != nil {
+		t.Fatalf("106-byte payload rejected: %v", err)
+	} else if len(rows) != 37 {
+		t.Fatalf("106-byte payload rows=%d, want 37", len(rows))
+	}
+}

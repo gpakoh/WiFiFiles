@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sonroyaalmerol/go-smb-server/smb/auth"
 	smbntlm "github.com/sonroyaalmerol/go-smb-server/smb/ntlmssp"
@@ -742,4 +743,260 @@ func TestBreadcrumbAndDestinationDepthBranches(t *testing.T) {
 	if len(dests2) == 0 || !dests2[0].Selected || dests2[0].Path != "internal/nowhere" {
 		t.Fatalf("current-not-found prepend = %+v", dests2)
 	}
+}
+
+// ensureStorageMounts creates /mnt/ext1 and /mnt/ext2 on the test host when
+// they do not exist (PocketBook-only mount points, absent from the dev box).
+// It never removes directories it did not create.
+func ensureStorageMounts(t *testing.T) {
+	t.Helper()
+	created := make([]string, 0, 2)
+	for _, p := range []string{"/mnt/ext1", "/mnt/ext2"} {
+		if _, err := os.Stat(p); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(p, 0755); err != nil {
+			continue
+		}
+		created = append(created, p)
+	}
+	if len(created) == 0 {
+		if _, e1 := os.Stat("/mnt/ext1"); e1 != nil {
+			if _, e2 := os.Stat("/mnt/ext2"); e2 != nil {
+				t.Skip("neither /mnt/ext1 nor /mnt/ext2 available for SMB share")
+			}
+		}
+	}
+	t.Cleanup(func() {
+		for _, p := range created {
+			_ = os.RemoveAll(p)
+		}
+	})
+}
+
+// requireMntExt1Writable skips when /mnt/ext1 cannot be created on the test
+// host; used by tests that must write into PocketBook-only system paths.
+func requireMntExt1Writable(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create /mnt/ext1")
+	}
+	if _, err := os.Stat("/mnt/ext1"); err == nil {
+		t.Skip("/mnt/ext1 already exists; not touching it")
+	}
+	if err := os.MkdirAll("/mnt/ext1", 0755); err != nil {
+		t.Skipf("cannot create /mnt/ext1: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll("/mnt/ext1") })
+}
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+func TestStopFTPLockedRunning(t *testing.T) {
+	app := newTestWebApp(t)
+	ftp := NewFTPServer(app, t.TempDir(), 0)
+	if err := ftp.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sm := &ServiceManager{app: app, appDir: t.TempDir(), ftpSrv: ftp, ftpPort: 2121}
+	sm.stopFTPLocked()
+	if sm.ftpSrv != nil || sm.ftpPort != 0 {
+		t.Fatalf("ftp not cleared: %+v", sm)
+	}
+	sm.stopFTPLocked()
+	if sm.ftpSrv != nil {
+		t.Fatal("ftp stop not idempotent")
+	}
+}
+
+func TestStartSMBLockedLifecycle(t *testing.T) {
+	ensureStorageMounts(t)
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app, appDir: t.TempDir()}
+	hash := "00112233445566778899aabbccddeeff"
+
+	cfg := Config{
+		Username:        "pb",
+		SMBNTHash:       hash,
+		InternalEnabled: true,
+		SDEnabled:       true,
+		SMBPort:         freeTCPPort(t),
+	}
+	key := fmt.Sprintf("%s|%s|%t|%t|%d", strings.ToLower(cfg.Username), cfg.SMBNTHash, cfg.InternalEnabled, cfg.SDEnabled, smbListenPort(cfg))
+
+	sm.startSMBLocked(cfg, key)
+	if sm.smbSrv == nil {
+		t.Fatalf("smb not started: %+v", sm)
+	}
+	if sm.smbPort != cfg.SMBPort || sm.smbKey != key || sm.smbErr != "" {
+		t.Fatalf("smb state: %+v", sm)
+	}
+
+	sm.mu.Lock()
+	sm.stopSMBLocked()
+	sm.mu.Unlock()
+	if sm.smbSrv != nil || sm.smbCancel != nil || sm.smbPort != 0 || sm.smbKey != "" {
+		t.Fatalf("smb not stopped: %+v", sm)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	busy, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	cfg2 := Config{
+		Username:        "pb",
+		SMBNTHash:       hash,
+		InternalEnabled: true,
+		SDEnabled:       false,
+		SMBPort:         busyPort,
+	}
+	key2 := fmt.Sprintf("%s|%s|%t|%t|%d", strings.ToLower(cfg2.Username), cfg2.SMBNTHash, cfg2.InternalEnabled, cfg2.SDEnabled, smbListenPort(cfg2))
+	sm.startSMBLocked(cfg2, key2)
+	if sm.smbSrv != nil {
+		t.Fatalf("smb started on busy port: %+v", sm)
+	}
+	if !strings.Contains(sm.smbErr, "уже занят") {
+		t.Fatalf("busy port error = %q", sm.smbErr)
+	}
+}
+
+func TestStartSMBLockedErrorBranches(t *testing.T) {
+	app := newTestWebApp(t)
+	sm := &ServiceManager{app: app, appDir: t.TempDir()}
+
+	sm.startSMBLocked(Config{Username: "pb"}, "key")
+	if sm.smbSrv != nil || !strings.Contains(sm.smbErr, "re-enter password") {
+		t.Fatalf("missing hash: smbErr=%q srv=%v", sm.smbErr, sm.smbSrv != nil)
+	}
+
+	sm.smbErr = ""
+	sm.startSMBLocked(Config{Username: "pb", SMBNTHash: "zzz"}, "key")
+	if sm.smbSrv != nil || !strings.Contains(sm.smbErr, "corrupted") {
+		t.Fatalf("invalid hex: smbErr=%q", sm.smbErr)
+	}
+
+	sm.smbErr = ""
+	sm.startSMBLocked(Config{Username: "pb", SMBNTHash: "00112233"}, "key")
+	if sm.smbSrv != nil || !strings.Contains(sm.smbErr, "corrupted") {
+		t.Fatalf("short hash: smbErr=%q", sm.smbErr)
+	}
+
+	sm.smbErr = ""
+	sm.startSMBLocked(Config{Username: "pb", SMBNTHash: "00112233445566778899aabbccddeeff"}, "key")
+	if sm.smbSrv != nil || !strings.Contains(sm.smbErr, "no storage") {
+		t.Fatalf("no storage: smbErr=%q", sm.smbErr)
+	}
+}
+
+func TestWriteNativeStateStoppedWithConfig(t *testing.T) {
+	requireMntExt1Writable(t)
+	cfg := Config{
+		ConfigVersion:   7,
+		Username:        "pocketbook",
+		PasswordSalt:    "testsalt",
+		PasswordHash:    passwordHash("testsalt", "650wifi"),
+		SMBNTHash:       "00112233445566778899aabbccddeeff",
+		DAVDigestHA1:    digestHA1("pocketbook", "650wifi"),
+		Port:            8080,
+		HTTPEnabled:     true,
+		HTTPPort:        8080,
+		FTPPort:         2121,
+		SMBPort:         4445,
+		LoggingEnabled:  false,
+		InternalEnabled: true,
+		SDEnabled:       true,
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(persistentConfigPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(persistentConfigPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	writeNativeStateStopped(dir, "Серверы выключены")
+	state, err := os.ReadFile(filepath.Join(dir, "native_state.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(state)
+	for _, want := range []string{"running=0", "http_enabled=1", "http_error=", "smb_credentials_ready=1", "message=Серверы выключены"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("state missing %q: %q", want, text)
+		}
+	}
+	if strings.Contains(text, "Launch error") {
+		t.Fatalf("config load failed, fallback written: %q", text)
+	}
+}
+
+func waitForLogLine(t *testing.T, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(unifiedLogPath); err == nil && strings.Contains(string(data), want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(unifiedLogPath)
+	t.Fatalf("log line %q not found within %v; log tail:\n%s", want, timeout, data)
+}
+
+func TestLoggingEnabledAndScannerFlow(t *testing.T) {
+	requireMntExt1Writable(t)
+	if err := os.MkdirAll(filepath.Dir(persistentConfigPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(persistentConfigPath, []byte(`{"logging_enabled":true,"username":"pocketbook"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join("/mnt/ext1", "system", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scanner := filepath.Join(binDir, "scanner.app")
+	if err := os.WriteFile(scanner, []byte("#!/bin/sh\necho 'Scan finished'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !loggingEnabledNow() {
+		t.Fatal("loggingEnabledNow = false with enabled config")
+	}
+	f, err := openProcessOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Name() != unifiedLogPath {
+		t.Fatalf("openProcessOutput = %q, want %q", f.Name(), unifiedLogPath)
+	}
+	_ = f.Close()
+
+	appendLog("", "test-append-log-direct")
+	waitForLogLine(t, "test-append-log-direct", 5*time.Second)
+
+	writeDiagnostic(t.TempDir())
+	waitForLogLine(t, "WiFiFiles diagnostic", 5*time.Second)
+
+	app := &App{}
+	app.runPocketBookScanner([]string{"/mnt/ext1/Books"})
+	waitForLogLine(t, "Library refresh started for: /mnt/ext1/Books", 10*time.Second)
+	waitForLogLine(t, "Library refresh finished", 10*time.Second)
 }

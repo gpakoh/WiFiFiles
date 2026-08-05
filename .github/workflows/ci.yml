@@ -17,13 +17,20 @@ jobs:
           go-version: "1.23"
 
       - name: Test
-        run: go test -v -count=1 server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go server_test.go mobile_test.go webdav_test.go qr_test.go portable_upload_test.go ftp_test.go
+        run: |
+          go test -v -count=1 -coverprofile=coverage.out $(ls *.go | grep -v _test) $(ls *_test.go)
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Coverage gate
+        run: |
+          COVER=$(go tool cover -func=coverage.out | tail -1 | awk '{print $NF}' | tr -d '%')
+          awk -v c="$COVER" 'BEGIN { if (c < 86.0) { print "Coverage " c "% below 86% gate"; exit 1 } print "Coverage OK: " c "%" }'
 
       - name: Vet
-        run: go vet server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go
+        run: go vet $(ls *.go | grep -v _test)
 
       - name: Cross-compile ARM
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath -o /dev/null $(ls *.go | grep -v _test)
 
   fuzz:
     runs-on: ubuntu-latest
@@ -36,6 +43,6 @@ jobs:
 
       - name: Fuzz smoke test
         run: |
-          go test -run "^$" -fuzz "^FuzzParseDigestHeader$" -fuzztime 10s server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go fuzz_test.go
-          go test -run "^$" -fuzz "^FuzzParseNativeApply$" -fuzztime 10s server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go fuzz_test.go
-          go test -run "^$" -fuzz "^FuzzFTPCommandParsing$" -fuzztime 10s server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go fuzz_test.go
+          go test -run "^$" -fuzz "^FuzzParseDigestHeader$" -fuzztime 10s $(ls *.go | grep -v _test) fuzz_test.go
+          go test -run "^$" -fuzz "^FuzzParseNativeApply$" -fuzztime 10s $(ls *.go | grep -v _test) fuzz_test.go
+          go test -run "^$" -fuzz "^FuzzFTPCommandParsing$" -fuzztime 10s $(ls *.go | grep -v _test) fuzz_test.go

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -422,6 +423,66 @@ func TestHandleCredentials(t *testing.T) {
 	}
 }
 
+func TestHandleCredentialsPasswordValidation(t *testing.T) {
+	sm := newTestServiceManager(t)
+	h := sm.handleCredentials
+
+	for _, password := range []string{"short", strings.Repeat("p", 129)} {
+		req := httptest.NewRequest("POST", "/credentials", strings.NewReader("username=owner&password="+password))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "password+must+be+6-128") {
+			t.Fatalf("password %q = %d loc=%q", password, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+}
+
+func TestHandleCredentialsUsernameOnlyChange(t *testing.T) {
+	sm := newTestServiceManager(t)
+	h := sm.handleCredentials
+
+	changeUser := func(username string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/credentials", strings.NewReader("username="+username+"&password="))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("username change = %d", rec.Code)
+		}
+	}
+
+	cfg := sm.app.configSnapshot()
+	if !usesDefaultPassword(cfg) {
+		t.Fatal("test app must start with default password")
+	}
+	changeUser("renamed")
+	cfg = sm.app.configSnapshot()
+	if cfg.Username != "renamed" {
+		t.Fatalf("username = %q", cfg.Username)
+	}
+	if cfg.DAVDigestHA1 != digestHA1("renamed", "650wifi") {
+		t.Fatalf("digest HA1 not recalculated for default password: %q", cfg.DAVDigestHA1)
+	}
+
+	custom := httptest.NewRequest("POST", "/credentials", strings.NewReader("username=renamed&password=custompass123"))
+	custom.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h(rec, custom)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("set custom password = %d", rec.Code)
+	}
+	changeUser("renamed2")
+	cfg = sm.app.configSnapshot()
+	if cfg.DAVDigestHA1 != "" {
+		t.Fatalf("digest HA1 must be cleared for custom password: %q", cfg.DAVDigestHA1)
+	}
+	if cfg.PasswordHash == "" || cfg.SMBNTHash == "" {
+		t.Fatalf("hashes lost after username-only change: %+v", cfg)
+	}
+}
+
 func TestHandleControlAndControlData(t *testing.T) {
 	sm := newTestServiceManager(t)
 	req := httptest.NewRequest("GET", "/?msg=hi", nil)
@@ -446,6 +507,14 @@ func TestHandleControlAndControlData(t *testing.T) {
 	sm.handleControl(rec, httptest.NewRequest("GET", "/nope", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("handleControl /nope = %d", rec.Code)
+	}
+
+	broken := newTestServiceManager(t)
+	broken.app.tmpl = template.Must(template.New("control").Parse(`{{template "missing-sub" .}}`))
+	rec = httptest.NewRecorder()
+	broken.handleControl(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("handleControl broken template = %d, want 500", rec.Code)
 	}
 }
 
@@ -681,5 +750,140 @@ func TestMobileTargetLabelVariants(t *testing.T) {
 	}
 	if got := mobileTargetLabel("xx", "internal/Books"); got != "Память ридера / Books" {
 		t.Fatalf("default lang = %q", got)
+	}
+}
+
+func TestHandleStop(t *testing.T) {
+	sm := newTestServiceManager(t)
+	sm.stopCh = make(chan struct{})
+
+	rr := httptest.NewRecorder()
+	sm.handleStop(rr, httptest.NewRequest("GET", "/stop", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /stop = %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	sm.handleStop(rr, httptest.NewRequest("POST", "/stop", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "выключается") {
+		t.Fatalf("POST /stop = %d body=%q", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-sm.stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop channel not closed after handleStop")
+	}
+}
+
+func TestHandleServicesParseAndSaveErrors(t *testing.T) {
+	sm := newTestServiceManager(t)
+	h := sm.handleServices
+
+	req := httptest.NewRequest("POST", "/services", strings.NewReader("http_port=8081&ftp_port=%zz&smb_port=4446"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "failed+to+read+settings") {
+		t.Fatalf("parse error = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	sm.app.cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	req = httptest.NewRequest("POST", "/services", strings.NewReader("http_port=8081&ftp_port=2122&smb_port=4446&internal=on&http_enabled=off&ftp_enabled=off&smb_enabled=off"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = httptest.NewRecorder()
+	h(rr, req)
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "Failed+to+save") {
+		t.Fatalf("save error = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestHandleCredentialsValidationBranches(t *testing.T) {
+	sm := newTestServiceManager(t)
+	sm.app.cfgMu.Lock()
+	sm.app.cfg.HTTPEnabled = false
+	sm.app.cfgMu.Unlock()
+	h := sm.handleCredentials
+
+	rr := httptest.NewRecorder()
+	h(rr, httptest.NewRequest("GET", "/credentials", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /credentials = %d", rr.Code)
+	}
+
+	post := func(form string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/credentials", strings.NewReader(form))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr := httptest.NewRecorder()
+		h(rr, req)
+		return rr
+	}
+
+	rr = post("username=" + strings.Repeat("u", 33) + "&password=secret1")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "username+must+be") {
+		t.Fatalf("username too long = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("username=owner&password=12345")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "password+must+be") {
+		t.Fatalf("password too short = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("username=owner&password=" + strings.Repeat("p", 129))
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "password+must+be") {
+		t.Fatalf("password too long = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("username=owner&password=supersecret")
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("set password = %d", rr.Code)
+	}
+
+	rr = post("username=owner2")
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("rename without password = %d", rr.Code)
+	}
+	cfg := sm.app.configSnapshot()
+	if cfg.Username != "owner2" || cfg.DAVDigestHA1 != "" {
+		t.Fatalf("custom password rename: user=%q da1=%q", cfg.Username, cfg.DAVDigestHA1)
+	}
+
+	sm.app.cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	rr = post("username=final&password=secret1")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(rr.Header().Get("Location"), "Failed+to+save") {
+		t.Fatalf("save error = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestHandleCredentialsDefaultPasswordRename(t *testing.T) {
+	sm := newTestServiceManager(t)
+	sm.app.cfgMu.Lock()
+	sm.app.cfg.HTTPEnabled = false
+	sm.app.cfgMu.Unlock()
+
+	req := httptest.NewRequest("POST", "/credentials", strings.NewReader("username=renamed"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	sm.handleCredentials(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("rename = %d", rr.Code)
+	}
+	cfg := sm.app.configSnapshot()
+	if cfg.Username != "renamed" {
+		t.Fatalf("username = %q", cfg.Username)
+	}
+	if cfg.DAVDigestHA1 != digestHA1("renamed", "650wifi") {
+		t.Fatalf("default password DA1 not recalculated: %q", cfg.DAVDigestHA1)
+	}
+
+	req = httptest.NewRequest("POST", "/credentials", strings.NewReader("username=renamed"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr = httptest.NewRecorder()
+	sm.handleCredentials(rr, req)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("same-name rename = %d", rr.Code)
+	}
+	if got := sm.app.configSnapshot().DAVDigestHA1; got != digestHA1("renamed", "650wifi") {
+		t.Fatalf("DA1 changed on same-name post: %q", got)
 	}
 }

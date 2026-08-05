@@ -230,3 +230,11 @@ func containsAll(s string, parts ...string) bool {
 	}
 	return true
 }
+
+func TestCommitTempAutoRenameStatError(t *testing.T) {
+	dir := t.TempDir()
+	longName := strings.Repeat("a", 300) + ".txt"
+	if _, err := commitTempAutoRename(dir, longName, filepath.Join(dir, "src")); err == nil {
+		t.Fatal("Stat on too-long name should fail")
+	}
+}

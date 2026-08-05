@@ -614,7 +614,7 @@ func TestPrepareStorageLayoutNoMount(t *testing.T) {
 }
 
 func TestPrepareStorageLayoutMigratesLegacy(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	legacyDir := filepath.Join(legacyAppDirPath)
 	if err := os.MkdirAll(legacyDir, 0755); err != nil {
 		t.Fatal(err)
@@ -640,7 +640,7 @@ func TestPrepareStorageLayoutMigratesLegacy(t *testing.T) {
 }
 
 func TestPrepareStorageLayoutStopsLegacyManager(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	legacyDir := filepath.Join(legacyAppDirPath)
 	if err := os.MkdirAll(legacyDir, 0755); err != nil {
 		t.Fatal(err)
@@ -794,7 +794,7 @@ func TestRunPocketBookScannerNotFound(t *testing.T) {
 }
 
 func TestRunPocketBookScannerRuns(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	scannerDir := filepath.Dir("/mnt/ext1/system/bin/scanner.app")
 	if err := os.MkdirAll(scannerDir, 0755); err != nil {
 		t.Fatal(err)

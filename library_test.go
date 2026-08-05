@@ -82,7 +82,7 @@ func scanTempLogs() []string {
 }
 
 func TestRunPocketBookScannerLifecycle(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	scannerDir := "/mnt/ext1/system/bin"
 	if err := os.MkdirAll(scannerDir, 0755); err != nil {
 		t.Fatal(err)

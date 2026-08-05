@@ -879,3 +879,28 @@ func TestFTPListAndMLSTVariants(t *testing.T) {
 		t.Fatalf("NLST reply = %q", got)
 	}
 }
+
+func TestFTPRenameOntoDirAndDeleteDir(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("CWD internal/Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD: %q", got)
+	}
+	if got := c.cmd("MKD ddir"); !strings.HasPrefix(got, "257 ") {
+		t.Fatalf("MKD ddir: %q", got)
+	}
+	if got := c.cmd("DELE ddir"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("DELE of dir should be 550: %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(app.roots["internal"], "Books", "r.txt"), []byte("r"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.cmd("RNFR r.txt"); !strings.HasPrefix(got, "350 ") {
+		t.Fatalf("RNFR: %q", got)
+	}
+	if got := c.cmd("RNTO ddir"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("RNTO onto dir should be 550: %q", got)
+	}
+}

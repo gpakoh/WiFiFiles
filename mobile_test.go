@@ -1778,3 +1778,39 @@ func TestMobileUploadLimitReached(t *testing.T) {
 		t.Fatalf("multipart over limit = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestWriteMobileTokensError(t *testing.T) {
+	_ = os.RemoveAll(runtimeDirPath)
+	if err := os.WriteFile(runtimeDirPath, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDirPath) })
+	if err := writeMobileTokens(nil); err == nil {
+		t.Fatal("writeMobileTokens should fail when runtime dir is a file")
+	}
+}
+
+func TestRawMobileUploadRenamesOccupiedName(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "safe")
+	firstRR, first := mobileRawUploadRequest(t, app, token, "raw-name-1", "book.epub", []byte("same"))
+	if firstRR.Code != http.StatusOK || first.Status != "uploaded" {
+		t.Fatalf("first status=%d result=%+v", firstRR.Code, first)
+	}
+	secondRR, second := mobileRawUploadRequest(t, app, token, "raw-name-2", "book.epub", []byte("different"))
+	if secondRR.Code != http.StatusOK || second.Status != "renamed" || second.StoredAs != "book (1).epub" {
+		t.Fatalf("second status=%d result=%+v body=%s", secondRR.Code, second, secondRR.Body.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(books, "book*.epub"))
+	if err != nil || len(matches) != 2 {
+		t.Fatalf("files=%v err=%v", matches, err)
+	}
+}
+
+func TestRawMobileUploadRejectsOversizedUploadID(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	longID := strings.Repeat("x", 241)
+	rr, _ := mobileRawUploadRequest(t, app, token, longID, "book.epub", []byte("data"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversized upload_id status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

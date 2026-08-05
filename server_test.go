@@ -902,7 +902,7 @@ func TestStartSMBLockedErrorBranches(t *testing.T) {
 }
 
 func TestWriteNativeStateStoppedWithConfig(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	cfg := Config{
 		ConfigVersion:   7,
 		Username:        "pocketbook",
@@ -961,7 +961,7 @@ func waitForLogLine(t *testing.T, want string, timeout time.Duration) {
 }
 
 func TestLoggingEnabledAndScannerFlow(t *testing.T) {
-	requireMntExt1Writable(t)
+	ensureStorageMounts(t)
 	if err := os.MkdirAll(filepath.Dir(persistentConfigPath), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -999,4 +999,48 @@ func TestLoggingEnabledAndScannerFlow(t *testing.T) {
 	app.runPocketBookScanner([]string{"/mnt/ext1/Books"})
 	waitForLogLine(t, "Library refresh started for: /mnt/ext1/Books", 10*time.Second)
 	waitForLogLine(t, "Library refresh finished", 10*time.Second)
+}
+
+func TestLoadOrCreateConfigPortMigration(t *testing.T) {
+	dir := t.TempDir()
+	salt := "testsalt"
+	cfg := Config{
+		ConfigVersion:   7,
+		Username:        "pocketbook",
+		PasswordSalt:    salt,
+		PasswordHash:    passwordHash(salt, "650wifi"),
+		HTTPPort:        80,
+		FTPPort:         1,
+		InternalEnabled: false,
+		SDEnabled:       false,
+	}
+	data, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(dir, "mig.json")
+	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	app, err := newApp(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.loadOrCreateConfig(); err != nil {
+		t.Fatalf("port migration: %v", err)
+	}
+	app.cfgMu.RLock()
+	defer app.cfgMu.RUnlock()
+	if app.cfg.HTTPPort != 8080 {
+		t.Fatalf("HTTPPort not reset: %d", app.cfg.HTTPPort)
+	}
+	if app.cfg.FTPPort != 2121 {
+		t.Fatalf("FTPPort not reset: %d", app.cfg.FTPPort)
+	}
+	if !app.cfg.InternalEnabled || !app.cfg.SDEnabled {
+		t.Fatalf("shares not re-enabled: %+v", app.cfg)
+	}
+	if app.cfg.SMBNTHash == "" {
+		t.Fatal("SMBNTHash not filled")
+	}
+	if app.cfg.DAVDigestHA1 == "" {
+		t.Fatal("DAVDigestHA1 not filled")
+	}
 }

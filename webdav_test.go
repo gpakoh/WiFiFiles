@@ -1657,3 +1657,54 @@ func TestDAVUnusedPathError(t *testing.T) {
 		t.Fatal("CreateTemp in missing parent should fail")
 	}
 }
+
+func TestWebDAVCopyVariants(t *testing.T) {
+	dav, _ := newTestDAV(t)
+
+	rec := davRequest(t, dav, "COPY", "/dav/internal/src", "", nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("COPY without Destination: got %d", rec.Code)
+	}
+
+	h := map[string]string{"Destination": "/dav/internal/dst"}
+
+	rec = davRequest(t, dav, "COPY", "/dav/", "", h)
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusNoContent {
+		t.Fatal("COPY of root succeeded")
+	}
+
+	rec = davRequest(t, dav, "COPY", "/dav/internal/nonexistent-copy-src", "", h)
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusNoContent {
+		t.Fatal("COPY of missing src succeeded")
+	}
+
+	hP := map[string]string{"Destination": "/dav/system/x"}
+	rec = davRequest(t, dav, "COPY", "/dav/internal/protected-dst-src", "", hP)
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusNoContent {
+		t.Fatal("COPY into protected dst succeeded")
+	}
+
+	rec = davRequest(t, dav, "PUT", "/dav/internal/copysrc.txt", "hello", nil)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT src: got %d", rec.Code)
+	}
+	h3 := map[string]string{"Destination": "/dav/internal/copydst.txt"}
+	rec = davRequest(t, dav, "COPY", "/dav/internal/copysrc.txt", "", h3)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusNoContent {
+		t.Fatalf("COPY success: got %d", rec.Code)
+	}
+	rec = davRequest(t, dav, "COPY", "/dav/internal/copysrc.txt", "", h3)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusNoContent {
+		t.Fatalf("COPY overwrite: got %d", rec.Code)
+	}
+
+	rec = davRequest(t, dav, "PUT", "/dav/internal/self-copy", "x", nil)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT setup: got %d", rec.Code)
+	}
+	h2 := map[string]string{"Destination": "/dav/internal/self-copy"}
+	rec = davRequest(t, dav, "COPY", "/dav/internal/self-copy", "", h2)
+	if rec.Code == http.StatusCreated || rec.Code == http.StatusNoContent {
+		t.Fatal("COPY onto itself succeeded")
+	}
+}

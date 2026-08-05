@@ -15,6 +15,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--manager" {
+		os.Exit(0)
+	}
 	code := m.Run()
 	cleanupTestExt1()
 	os.Exit(code)
@@ -408,6 +411,49 @@ func TestNativeMobileQRFileMissingRequest(t *testing.T) {
 	}
 }
 
+func TestNativeMobileQRFileNewAppError(t *testing.T) {
+	_, statErr := os.Stat("/mnt/ext1")
+	rootCreated := os.IsNotExist(statErr)
+	_ = os.MkdirAll(filepath.Dir(persistentConfigPath), 0755)
+	if err := os.Mkdir(persistentConfigPath, 0755); err != nil {
+		t.Skipf("cannot shadow config path: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Dir(persistentConfigPath))
+		if rootCreated {
+			_ = os.RemoveAll("/mnt/ext1")
+		}
+	})
+	_ = os.Remove(nativeMobileRequestPath)
+	t.Cleanup(func() { _ = os.Remove(nativeMobileRequestPath) })
+	_ = os.Remove(nativeMobileQRPath)
+	t.Cleanup(func() { _ = os.Remove(nativeMobileQRPath) })
+	if err := os.WriteFile(nativeMobileRequestPath, []byte("target=internal\nip=192.168.1.5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeMobileQRFile(t.TempDir())
+	data, _ := os.ReadFile(nativeMobileQRPath)
+	if !strings.Contains(string(data), "error=") || strings.Contains(string(data), "error=\n") {
+		t.Fatalf("expected non-empty newApp error, got %q", string(data))
+	}
+}
+
+func TestNativeMobileQRFileBadTarget(t *testing.T) {
+	writePersistentTestConfig(t, nativeTestConfig())
+	_ = os.Remove(nativeMobileRequestPath)
+	t.Cleanup(func() { _ = os.Remove(nativeMobileRequestPath) })
+	_ = os.Remove(nativeMobileQRPath)
+	t.Cleanup(func() { _ = os.Remove(nativeMobileQRPath) })
+	if err := os.WriteFile(nativeMobileRequestPath, []byte("target=no-such-volume/x\nip=192.168.1.5\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeMobileQRFile(t.TempDir())
+	data, _ := os.ReadFile(nativeMobileQRPath)
+	if !strings.Contains(string(data), "error=") {
+		t.Fatalf("expected resolvePath error, got %q", string(data))
+	}
+}
+
 func TestNativeMobileQRFileInvalidIP(t *testing.T) {
 	writePersistentTestConfig(t, nativeTestConfig())
 	_ = os.Remove(nativeMobileRequestPath)
@@ -521,6 +567,86 @@ func TestNativeApplyFileSMBRequiresPassword(t *testing.T) {
 	state := readNativeState(t, dir)
 	if !strings.Contains(state, "Для SMB введите пароль заново") {
 		t.Fatalf("want SMB password message, got: %q", state)
+	}
+}
+
+func TestNativeApplyFileSuccess(t *testing.T) {
+	cfg := nativeTestConfig()
+	cfg.PasswordSalt = "customsalt"
+	cfg.PasswordHash = passwordHash("customsalt", "secret123")
+	cfg.SMBNTHash = hexEncodeNTHash()
+	cfg.DAVDigestHA1 = digestHA1("pocketbook", "secret123")
+	writePersistentTestConfig(t, cfg)
+	dir := t.TempDir()
+	ini := "username=newuser\nhttp_port=8123\nftp_port=2122\nsmb_port=4455\ninternal_enabled=1\nsd_enabled=0\nhttp_enabled=1\nftp_enabled=0\nsmb_enabled=0\nlogging_enabled=0\nlanguage=ru\npassword=superpass123\n"
+	if err := os.WriteFile(filepath.Join(dir, "native_apply.ini"), []byte(ini), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeApplyFile(dir)
+	state := readNativeState(t, dir)
+	if !strings.Contains(state, "Launch error") && state != "" {
+		t.Fatalf("unexpected state: %q", state)
+	}
+}
+
+func TestNativeApplyFileRestartsLiveManager(t *testing.T) {
+	cfg := nativeTestConfig()
+	cfg.PasswordSalt = "customsalt"
+	cfg.PasswordHash = passwordHash("customsalt", "secret123")
+	cfg.SMBNTHash = hexEncodeNTHash()
+	cfg.DAVDigestHA1 = digestHA1("pocketbook", "secret123")
+	writePersistentTestConfig(t, cfg)
+	dir := t.TempDir()
+	child := startChildProcess(t)
+	writePIDFile(t, dir, child.Process.Pid)
+	ini := "username=pbk\nhttp_port=8123\nftp_port=2122\nsmb_port=4455\ninternal_enabled=1\nsd_enabled=0\nhttp_enabled=1\nftp_enabled=0\nsmb_enabled=0\nlogging_enabled=0\n"
+	if err := os.WriteFile(filepath.Join(dir, "native_apply.ini"), []byte(ini), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeApplyFile(dir)
+	if _, err := os.Stat(filepath.Join(dir, "wififiles.pid")); err == nil {
+		t.Fatal("stale pid file left behind")
+	}
+}
+
+func TestNativeApplyFileDefaultPasswordRename(t *testing.T) {
+	cfg := nativeTestConfig()
+	cfg.SMBNTHash = hexEncodeNTHash()
+	cfg.DAVDigestHA1 = digestHA1("pocketbook", "650wifi")
+	writePersistentTestConfig(t, cfg)
+	dir := t.TempDir()
+	ini := "username=renamed\nhttp_port=8123\nftp_port=2122\nsmb_port=4455\ninternal_enabled=1\nsd_enabled=0\nhttp_enabled=1\nftp_enabled=0\nsmb_enabled=0\nlogging_enabled=0\n"
+	if err := os.WriteFile(filepath.Join(dir, "native_apply.ini"), []byte(ini), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeApplyFile(dir)
+	state := readNativeState(t, dir)
+	if !strings.Contains(state, "Launch error") && state != "" {
+		t.Fatalf("unexpected state: %q", state)
+	}
+}
+
+func TestNativeApplyFileSaveConfigError(t *testing.T) {
+	cfg := nativeTestConfig()
+	cfg.PasswordSalt = "customsalt"
+	cfg.PasswordHash = passwordHash("customsalt", "secret123")
+	cfg.SMBNTHash = hexEncodeNTHash()
+	cfg.DAVDigestHA1 = digestHA1("pocketbook", "secret123")
+	writePersistentTestConfig(t, cfg)
+	tmpPath := persistentConfigPath + ".tmp"
+	if err := os.MkdirAll(tmpPath, 0755); err != nil {
+		t.Skipf("cannot shadow tmp config path: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpPath) })
+	dir := t.TempDir()
+	ini := "username=pbk\nhttp_port=8123\nftp_port=2122\nsmb_port=4455\ninternal_enabled=1\nsd_enabled=0\nhttp_enabled=1\nftp_enabled=0\nsmb_enabled=0\nlogging_enabled=0\n"
+	if err := os.WriteFile(filepath.Join(dir, "native_apply.ini"), []byte(ini), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nativeApplyFile(dir)
+	state := readNativeState(t, dir)
+	if !strings.Contains(state, "Ошибка сохранения") {
+		t.Fatalf("expected save error in state, got %q", state)
 	}
 }
 

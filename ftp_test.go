@@ -83,6 +83,24 @@ func (c *ftpClient) reply() string {
 	return strings.TrimRight(line, "\r\n")
 }
 
+func (c *ftpClient) multilineReply() string {
+	var out []string
+	for {
+		line := c.reply()
+		out = append(out, line)
+		if len(line) >= 4 && line[3] == ' ' {
+			return strings.Join(out, "\n")
+		}
+	}
+}
+
+func (c *ftpClient) multilineCmd(command string) string {
+	if _, err := fmt.Fprintf(c.conn, "%s\r\n", command); err != nil {
+		return "ERR " + err.Error()
+	}
+	return c.multilineReply()
+}
+
 func (c *ftpClient) login(t *testing.T) {
 	t.Helper()
 	if got := c.cmd("USER pocketbook"); !strings.HasPrefix(got, "331 ") {
@@ -599,6 +617,29 @@ func TestFTPMLSTMissing(t *testing.T) {
 
 	if got := c.cmd("MLST /nope.txt"); !strings.HasPrefix(got, "550 ") {
 		t.Fatalf("MLST missing = %q", got)
+	}
+}
+
+func TestFTPMLSTFileAndDirTypes(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if err := os.WriteFile(filepath.Join(app.roots["internal"], "Books", "ok.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := c.multilineCmd("MLST internal/Books/ok.txt")
+	if !strings.Contains(got, "type=file") || !strings.Contains(got, "ok.txt") {
+		t.Fatalf("MLST file = %q", got)
+	}
+	if !strings.HasPrefix(got, "250-") {
+		t.Fatalf("MLST file prefix = %q", got)
+	}
+
+	got = c.multilineCmd("MLST internal/Books")
+	if !strings.Contains(got, "type=dir") || !strings.Contains(got, "Books") {
+		t.Fatalf("MLST dir = %q", got)
 	}
 }
 

@@ -1438,3 +1438,52 @@ func TestMobileVisibleAndDeleteAll(t *testing.T) {
 		t.Fatal(".hidden should remain")
 	}
 }
+
+func TestDeleteAllMobileFilesMissingDir(t *testing.T) {
+	app := newTestAuthApp(t)
+	deleted, err := app.deleteAllMobileFiles(filepath.Join(t.TempDir(), "nope"))
+	if err == nil || deleted != 0 {
+		t.Fatalf("missing dir: deleted=%d err=%v", deleted, err)
+	}
+}
+
+func TestHandleMobileDownloadVariants(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+	book := filepath.Join(books, "inside.epub")
+	if err := os.WriteFile(book, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(book, filepath.Join(books, "link.epub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(books, "adir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(query string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/download"+query, nil))
+		return rr
+	}
+
+	if rr := get("?name=../outside.epub"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("traversal name = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := get("?name=nope.epub"); rr.Code != http.StatusNotFound {
+		t.Fatalf("missing name = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := get("?name=adir"); rr.Code != http.StatusNotFound {
+		t.Fatalf("dir name = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := get("?name=link.epub"); rr.Code != http.StatusNotFound {
+		t.Fatalf("symlink name = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr := get("?name=inside.epub")
+	if rr.Code != http.StatusOK || rr.Body.String() != "content" {
+		t.Fatalf("ok = %d body=%q", rr.Code, rr.Body.String())
+	}
+	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") || !strings.Contains(cd, "inside.epub") {
+		t.Fatalf("content-disposition = %q", cd)
+	}
+}

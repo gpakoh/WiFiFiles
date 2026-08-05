@@ -364,6 +364,8 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		}
 		a.scheduleLibraryRefresh(full)
 		appendLog(runtimeDirPath, "Mobile edit deleted /"+target+"/"+name)
+		activity.addDelete()
+		activity.addEvent(tr(a.cfgLang(), "Удалено: ", "Deleted: ", "Supprimé : ", "Gelöscht: ") + name)
 		mobileRedirect(w, r, token, "msg", "Удалено: "+name)
 	case action == "delete-all" && r.Method == http.MethodPost:
 		if record.Mode != "edit" {
@@ -376,6 +378,8 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		appendLog(runtimeDirPath, fmt.Sprintf("Mobile edit deleted all files /%s count=%d", target, count))
+		activity.addDelete()
+		activity.addEvent(fmt.Sprintf("%s %d", tr(a.cfgLang(), "Удалено файлов:", "Deleted files:", "Fichiers supprimés :", "Gelöschte Dateien:"), count))
 		mobileRedirect(w, r, token, "msg", fmt.Sprintf("Удалено файлов: %d", count))
 	case action == "rename" && r.Method == http.MethodPost:
 		if record.Mode != "edit" {
@@ -418,6 +422,7 @@ func (a *App) handleMobile(w http.ResponseWriter, r *http.Request) {
 		a.scheduleLibraryRefresh(oldPath)
 		a.scheduleLibraryRefresh(newPath)
 		appendLog(runtimeDirPath, "Mobile edit renamed /"+target+"/"+oldName+" -> "+newName)
+		activity.addEvent(tr(a.cfgLang(), "Переименовано: ", "Renamed: ", "Renommé : ", "Umbenannt: ") + oldName + " -> " + newName)
 		mobileRedirect(w, r, token, "msg", "Переименовано: "+newName)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -504,6 +509,8 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 	a.addMobilePending(token, filepath.Join(targetDir, stored))
 	a.rememberTarget(virtual)
 	appendLog(runtimeDirPath, "Mobile QR raw upload: "+stored)
+	activity.addUpload()
+	activity.addEvent(tr(a.cfgLang(), "Загружено: ", "Uploaded: ", "Téléversé : ", "Hochgeladen: ") + stored)
 	mobileJSON(w, http.StatusOK, result)
 }
 
@@ -646,6 +653,8 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 	a.addMobilePending(token, filepath.Join(targetDir, stored))
 	a.rememberTarget(virtual)
 	appendLog(runtimeDirPath, "Mobile QR upload: "+stored)
+	activity.addUpload()
+	activity.addEvent(tr(a.cfgLang(), "Загружено: ", "Uploaded: ", "Téléversé : ", "Hochgeladen: ") + stored)
 	mobileJSON(w, http.StatusOK, result)
 }
 
@@ -739,6 +748,7 @@ func (a *App) handleMobileDownloadAll(w http.ResponseWriter, r *http.Request, ta
 	}
 	_ = zw.Close()
 	appendLog(runtimeDirPath, fmt.Sprintf("Mobile edit downloaded all files count=%d", len(files)))
+	activity.addEvent(fmt.Sprintf("%s %d", tr(a.cfgLang(), "Скачано файлов:", "Downloaded files:", "Fichiers téléchargés :", "Heruntergeladene Dateien:"), len(files)))
 }
 
 func (a *App) deleteAllMobileFiles(targetDir string) (int, error) {

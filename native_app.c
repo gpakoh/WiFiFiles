@@ -217,6 +217,10 @@ struct app_state {
     char free_internal[32];
     char free_sd[32];
     char message[192];
+    int active_connections;
+    int uploaded_total;
+    int deleted_total;
+    char recent_log[1024];
 };
 
 static struct app_state st;
@@ -768,6 +772,8 @@ static char update_latest[32];
 #define MODE_QR_MODE 6
 #define MODE_QR 7
 #define MODE_SETTINGS 8
+#define MODE_LOG 9
+#define LOG_BACK 0
 #define MAIN_ROW_COUNT 13
 #define MAIN_STOP 13
 #define MAIN_PHONE 14
@@ -1019,6 +1025,10 @@ static void load_state(void) {
     ini_value(data, "recent4", st.recent_targets[3], sizeof(st.recent_targets[3]));
     ini_value(data, "free_internal", st.free_internal, sizeof(st.free_internal));
     ini_value(data, "free_sd", st.free_sd, sizeof(st.free_sd));
+    st.active_connections = ini_int(data, "active_connections", 0);
+    st.uploaded_total = ini_int(data, "uploaded_total", 0);
+    st.deleted_total = ini_int(data, "deleted_total", 0);
+    ini_value(data, "recent_log", st.recent_log, sizeof(st.recent_log));
     ini_value(data, "message", v, sizeof(v)); scopy(st.message, sizeof(st.message), v);
     current_lang = lang_from_code(st.language);
     localize_helper_message(st.message, sizeof(st.message));
@@ -1241,6 +1251,36 @@ static void build_status_line(int service, char *line, int cap) {
     }
 }
 
+static const char *connection_word(int n) {
+    if (current_lang == LANG_EN) return n == 1 ? "connection" : "connections";
+    if (current_lang == LANG_FR) return n == 1 ? "connexion" : "connexions";
+    if (current_lang == LANG_DE) return n == 1 ? "Verbindung" : "Verbindungen";
+    {
+        int d = n % 10, h = n % 100;
+        if (d == 1 && h != 11) return "подключение";
+        if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return "подключения";
+        return "подключений";
+    }
+}
+
+static void append_server_counters(char *line, int cap) {
+    if (!st.running) return;
+    if (st.active_connections > 0) {
+        scat(line, cap, " · ");
+        append_int(line, cap, st.active_connections);
+        scat(line, cap, " ");
+        scat(line, cap, connection_word(st.active_connections));
+    }
+    if (st.uploaded_total > 0 || st.deleted_total > 0) {
+        scat(line, cap, " · ");
+        scat(line, cap, L("удалено ", "deleted ", "supprimé ", "gelöscht "));
+        append_int(line, cap, st.deleted_total);
+        scat(line, cap, " / ");
+        scat(line, cap, L("загружено ", "uploaded ", "téléversé ", "hochgeladen "));
+        append_int(line, cap, st.uploaded_total);
+    }
+}
+
 static void draw_main_status(void) {
     char line[320]; int y = MAIN_STATUS_Y;
     int service_y;
@@ -1248,6 +1288,7 @@ static void draw_main_status(void) {
     DrawRect(18, y, screen_w - 36, MAIN_STATUS_H, BLACK);
     line[0] = 0;
     scat(line, sizeof(line), st.running ? L("СЕРВЕР РАБОТАЕТ", "SERVER RUNNING", "SERVEUR ACTIF", "SERVER LÄUFT") : L("СЕРВЕР ОСТАНОВЛЕН", "SERVER STOPPED", "SERVEUR ARRÊTÉ", "SERVER GESTOPPT"));
+    append_server_counters(line, sizeof(line));
     if (dirty) scat(line, sizeof(line), L("  • есть несохранённые изменения", "  • unapplied changes", "  • modifications non appliquées", "  • nicht übernommene Änderungen"));
     draw_text(font_status, 31, y + 5, screen_w - 62, 34, line, ALIGN_LEFT | VALIGN_MIDDLE | DOTS);
 
@@ -1858,7 +1899,35 @@ static void draw_settings(void) {
         scopy(label, sizeof(label), L("Проверить обновления", "Check for updates", "Rechercher des mises à jour", "Nach Updates suchen"));
     }
     draw_row(2, y + 140, label, "", 0);
-    draw_action(3, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
+    draw_row(3, y + 210, L("Журнал операций", "Operation log", "Journal des opérations", "Vorgangsprotokoll"), "", 0);
+    draw_action(4, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
+    finish_screen_update();
+}
+
+static void draw_log(void) {
+    char *p;
+    int y = 210, shown = 0;
+    ClearScreen();
+    draw_header(L("Журнал операций", "Operation log", "Journal des opérations", "Vorgangsprotokoll"));
+    p = st.recent_log;
+    while (*p && shown < 12 && y < screen_h - 96) {
+        char item[128];
+        int i = 0;
+        while (*p && *p != 1 && i < sizeof(item) - 1) item[i++] = *p++;
+        item[i] = 0;
+        if (*p == 1) p++;
+        if (item[0]) {
+            draw_text(font_small, 36, y, screen_w - 72, 26, item, ALIGN_LEFT | VALIGN_MIDDLE | DOTS);
+            y += 28;
+            shown++;
+        }
+    }
+    if (!st.recent_log[0]) {
+        draw_text(font_help, 36, y, screen_w - 72, 28,
+            L("Пока нет операций", "No operations yet", "Aucune opération pour l’instant", "Noch keine Vorgänge"),
+            ALIGN_LEFT | VALIGN_MIDDLE | DOTS);
+    }
+    draw_action(LOG_BACK, 18, screen_h - 72, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
     finish_screen_update();
 }
 
@@ -1912,6 +1981,7 @@ static void draw_current(void) {
     else if (screen_mode == MODE_QR_MODE) draw_qr_mode();
     else if (screen_mode == MODE_QR) draw_qr_screen();
     else if (screen_mode == MODE_SETTINGS) draw_settings();
+    else if (screen_mode == MODE_LOG) draw_log();
     else draw_main();
 }
 
@@ -2223,7 +2293,12 @@ static void activate_current(int idx) {
         if (idx == 0) { language_return_mode = MODE_SETTINGS; screen_mode = MODE_LANGUAGE; selected = current_lang; draw_current(); }
         else if (idx == 1) { settings_picker_mode = 1; screen_mode = MODE_STORAGE_PICKER; selected = st.internal_enabled ? 0 : 1; draw_current(); }
         else if (idx == 2) run_update_action();
-        else if (idx == 3) { screen_mode = MODE_MAIN; selected = 12; draw_current(); }
+        else if (idx == 3) { screen_mode = MODE_LOG; draw_current(); }
+        else if (idx == 4) { screen_mode = MODE_MAIN; selected = 12; draw_current(); }
+        return;
+    }
+    if (screen_mode == MODE_LOG) {
+        if (idx == LOG_BACK) { screen_mode = MODE_SETTINGS; selected = 3; draw_current(); }
         return;
     }
     if (screen_mode == MODE_STORAGE_PICKER) {
@@ -2342,7 +2417,12 @@ static int current_item_from_y(int x, int y) {
         if (y >= 210 && y < 255) return 0;
         if (y >= 280 && y < 325) return 1;
         if (y >= 350 && y < 395) return 2;
-        if (y >= screen_h - 72 && x >= 18 && x < 238) return 3;
+        if (y >= 420 && y < 465) return 3;
+        if (y >= screen_h - 72 && x >= 18 && x < 238) return 4;
+        return -1;
+    }
+    if (screen_mode == MODE_LOG) {
+        if (y >= screen_h - 72 && x >= 18 && x < 238) return LOG_BACK;
         return -1;
     }
     if (screen_mode == MODE_STORAGE_PICKER) {
@@ -2396,7 +2476,8 @@ static int max_selected(void) {
         if (settings_picker_mode) return STORAGE_BACK;
         return st.default_target[0] ? STORAGE_DEFAULT : STORAGE_BACK;
     }
-    if (screen_mode == MODE_SETTINGS) return 3;
+    if (screen_mode == MODE_SETTINGS) return 4;
+    if (screen_mode == MODE_LOG) return 0;
     if (screen_mode == MODE_FOLDER_PICKER) return FOLDER_REMEMBER;
     if (screen_mode == MODE_QR_MODE) return QR_MODE_BACK;
     if (screen_mode == MODE_QR) return QR_CHANGE_FOLDER;
@@ -2419,6 +2500,7 @@ static void handle_back(void) {
         else { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
     }
     else if (screen_mode == MODE_SETTINGS) { screen_mode = MODE_MAIN; selected = 12; draw_current(); }
+    else if (screen_mode == MODE_LOG) { screen_mode = MODE_SETTINGS; selected = 3; draw_current(); }
     else CloseApp();
 }
 

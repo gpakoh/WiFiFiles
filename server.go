@@ -452,6 +452,7 @@ func runManager(appDir string) {
 	defer os.Remove(filepath.Join(appDir, "wififiles.pid"))
 	defer os.Remove(filepath.Join(appDir, "wififiles.ready"))
 
+	activity.setPath(nativeStatePath(appDir))
 	app, err := newApp(persistentConfigPath)
 	if err != nil {
 		appendLog(appDir, "manager init: "+err.Error())
@@ -951,6 +952,11 @@ func writeNativeState(sm *ServiceManager, message string) {
 	}
 	fmt.Fprintf(&b, "free_internal=%s\n", cleanINIValue(freeInternal))
 	fmt.Fprintf(&b, "free_sd=%s\n", cleanINIValue(freeSD))
+	conns, uploaded, deleted, recent := activity.snapshot()
+	fmt.Fprintf(&b, "active_connections=%d\n", conns)
+	fmt.Fprintf(&b, "uploaded_total=%d\n", uploaded)
+	fmt.Fprintf(&b, "deleted_total=%d\n", deleted)
+	fmt.Fprintf(&b, "recent_log=%s\n", cleanINIValue(recent))
 	fmt.Fprintf(&b, "message=%s\n", cleanINIValue(message))
 	statePath := nativeStatePath(sm.appDir)
 	_ = os.Remove(statePath)
@@ -1806,7 +1812,16 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/info", a.auth(a.handleInfo))
 	mux.HandleFunc("/", a.auth(a.handleIndex))
-	return securityHeaders(mux)
+	return activityTracking(securityHeaders(mux))
+}
+
+func activityTracking(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			activity.noteClient(host)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -1817,6 +1832,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *App) cfgLang() string {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg.Language
 }
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {

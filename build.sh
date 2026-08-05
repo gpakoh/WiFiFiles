@@ -2,7 +2,7 @@
 set -eu
 OUT="${1:-build}"
 mkdir -p "$OUT"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath -ldflags='-s -w' -o "$OUT/WiFiFiles.server" server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go update.go
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath -ldflags='-s -w' -o "$OUT/WiFiFiles.server" server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go update.go activity.go
 CLANG="${CLANG:-clang}"
 CFLAGS='--target=arm-linux-gnueabi -march=armv5te -mfloat-abi=soft -Os -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -ffreestanding -fPIC'
 $CLANG $CFLAGS -c inkview_stub.c -o "$OUT/inkview_stub.o"

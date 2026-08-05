@@ -748,6 +748,8 @@ func (d *DAVServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	ok = true
 	d.app.scheduleLibraryRefresh(full)
 	appendLog(runtimeDirPath, "WebDAV PUT "+canonical)
+	activity.addUpload()
+	activity.addEvent(tr(d.app.cfgLang(), "Загружено: ", "Uploaded: ", "Téléversé : ", "Hochgeladen: ") + filepath.Base(canonical))
 	if existed {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -792,6 +794,8 @@ func (d *DAVServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	d.app.scheduleLibraryRefresh(full)
 	appendLog(runtimeDirPath, "WebDAV DELETE "+davRequestPath(r))
+	activity.addDelete()
+	activity.addEvent(tr(d.app.cfgLang(), "Удалено: ", "Deleted: ", "Supprimé : ", "Gelöscht: ") + filepath.Base(davRequestPath(r)))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -946,6 +950,7 @@ func (d *DAVServer) handleMove(w http.ResponseWriter, r *http.Request) {
 			d.app.scheduleLibraryRefresh(src)
 			d.app.scheduleLibraryRefresh(dst)
 			appendLog(runtimeDirPath, "WebDAV MOVE "+srcVirtual+" -> "+dstVirtual)
+			activity.addEvent(tr(d.app.cfgLang(), "Переименовано: ", "Renamed: ", "Renommé : ", "Umbenannt: ") + filepath.Base(srcVirtual) + " -> " + filepath.Base(dstVirtual))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -993,6 +998,7 @@ func (d *DAVServer) handleMove(w http.ResponseWriter, r *http.Request) {
 	d.app.scheduleLibraryRefresh(src)
 	d.app.scheduleLibraryRefresh(dst)
 	appendLog(runtimeDirPath, "WebDAV MOVE "+srcVirtual+" -> "+dstVirtual)
+	activity.addEvent(tr(d.app.cfgLang(), "Переименовано: ", "Renamed: ", "Renommé : ", "Umbenannt: ") + filepath.Base(srcVirtual) + " -> " + filepath.Base(dstVirtual))
 	if stage.Existed {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -1065,6 +1071,8 @@ func (d *DAVServer) handleCopy(w http.ResponseWriter, r *http.Request) {
 	success = true
 	d.app.scheduleLibraryRefresh(dst)
 	appendLog(runtimeDirPath, "WebDAV COPY "+srcVirtual+" -> "+dstVirtual)
+	activity.addUpload()
+	activity.addEvent(tr(d.app.cfgLang(), "Скопировано: ", "Copied: ", "Copié : ", "Kopiert: ") + filepath.Base(dstVirtual))
 	if stage.Existed {
 		w.WriteHeader(http.StatusNoContent)
 	} else {

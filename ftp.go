@@ -80,6 +80,9 @@ func (s *FTPServer) acceptLoop() {
 		}
 		_ = conn.SetKeepAlive(true)
 		_ = conn.SetKeepAlivePeriod(60 * time.Second)
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+			activity.noteClient(host)
+		}
 		s.wg.Add(1)
 		go func(c *net.TCPConn) {
 			defer s.wg.Done()

@@ -894,3 +894,18 @@ func TestRunManagerConfigError(t *testing.T) {
 	_ = os.Remove(filepath.Join(dir, "wififiles.pid"))
 	_ = os.Remove(filepath.Join(dir, "wififiles.ready"))
 }
+
+func TestStartSMBLockedInvalidHash(t *testing.T) {
+	sm := newTestServiceManager(t)
+	cfg := sm.app.configSnapshot()
+	cfg.SMBNTHash = "zz"
+	sm.startSMBLocked(cfg, "")
+	if sm.smbErr == "" {
+		t.Fatal("invalid NT hash not reported")
+	}
+}
+
+func TestShutdownWithControl(t *testing.T) {
+	sm := &ServiceManager{control: &http.Server{}}
+	sm.shutdown()
+}

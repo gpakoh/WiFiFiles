@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -335,4 +337,22 @@ func TestSMBRenameMissingParentAndEnumerateFilter(t *testing.T) {
 	}
 	_ = h.Close(ctx)
 
+}
+
+type noSetInfoHandle struct{}
+
+func (noSetInfoHandle) Read(context.Context, int64, []byte) (int, error)  { return 0, io.EOF }
+func (noSetInfoHandle) Write(context.Context, int64, []byte) (int, error) { return 0, nil }
+func (noSetInfoHandle) Close(context.Context) error                       { return nil }
+func (noSetInfoHandle) Stat(context.Context) (smbvfs.FileInfo, error)     { return smbvfs.FileInfo{}, nil }
+func (noSetInfoHandle) Enumerate(context.Context, string) iter.Seq2[smbvfs.FileInfo, error] {
+	return func(yield func(smbvfs.FileInfo, error) bool) {}
+}
+
+func TestSMBSetInfoNotSupported(t *testing.T) {
+	h := &safeSMBHandle{base: noSetInfoHandle{}}
+	err := h.SetInfo(context.Background(), &smbvfs.SetInfoRequest{})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("SetInfo = %v", err)
+	}
 }

@@ -1617,3 +1617,43 @@ func TestWebDAVLockBranches(t *testing.T) {
 		t.Fatalf("lock after expired = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestWebDAVDeleteSuccess(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	dir := filepath.Join(internal, "del-dir")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rec := davRequest(t, dav, "DELETE", "/dav/internal/del-dir", "", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE = %d", rec.Code)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir not removed: %v", err)
+	}
+}
+
+func TestWebDAVDeleteMissing(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	rec := davRequest(t, dav, "DELETE", "/dav/internal/does-not-exist", "", nil)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("DELETE missing returned 204")
+	}
+}
+
+func TestWebDAVDeleteBlocked(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	rec := davRequest(t, dav, "DELETE", "/dav/system/anything", "", nil)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("DELETE blocked path returned 204")
+	}
+}
+
+func TestDAVUnusedPathError(t *testing.T) {
+	if _, err := davUnusedPath("/nonexistent-parent-dir-xyz", "prefix-"); err == nil {
+		t.Fatal("CreateTemp in missing parent should fail")
+	}
+}

@@ -26,7 +26,7 @@ import (
 	smbserver "github.com/sonroyaalmerol/go-smb-server/smb/server"
 )
 
-const version = "0.7.27"
+const version = "0.7.28"
 
 const controlPort = 8090
 

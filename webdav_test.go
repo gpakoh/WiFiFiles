@@ -818,6 +818,45 @@ func TestHandleLockVariants(t *testing.T) {
 	}
 }
 
+func TestHandleLockExistingAndUnlockMissing(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.MkdirAll(filepath.Join(internal, "dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := davRequest(t, dav, "LOCK", "http://pb/dav/internal/dir", "", map[string]string{"Timeout": "Second-30"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lock existing dir = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "UNLOCK", "http://pb/dav/internal/dir", "", map[string]string{"Lock-Token": "<opaquelocktoken:unknown>"})
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("unlock missing = %d", rr.Code)
+	}
+}
+
+func TestDAVHTTPErrorStatuses(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{os.ErrNotExist, http.StatusNotFound},
+		{os.ErrExist, http.StatusPreconditionFailed},
+		{os.ErrPermission, http.StatusForbidden},
+		{errors.New("protected area"), http.StatusForbidden},
+		{errors.New("служба отключена"), http.StatusForbidden},
+		{os.ErrInvalid, http.StatusBadRequest},
+		{errors.New("boom"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		davHTTPError(rr, tc.err)
+		if rr.Code != tc.want {
+			t.Fatalf("davHTTPError(%v) = %d, want %d", tc.err, rr.Code, tc.want)
+		}
+	}
+}
+
 func TestHandleMkcolVariants(t *testing.T) {
 	dav, internal := newTestDAV(t)
 	if err := os.MkdirAll(filepath.Join(internal, "exists"), 0755); err != nil {

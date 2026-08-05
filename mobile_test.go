@@ -1487,3 +1487,128 @@ func TestHandleMobileDownloadVariants(t *testing.T) {
 		t.Fatalf("content-disposition = %q", cd)
 	}
 }
+
+func TestMobileFinishFlushAndMethodNotAllowed(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+	if err := os.WriteFile(filepath.Join(books, "b.epub"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/m/"+token+"/finish", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"ok":true`) {
+		t.Fatalf("finish = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/badaction", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("badaction = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestMobileRawUploadSuccessWithHeader(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+
+	u := "/m/" + token + "/upload?name=" + url.QueryEscape("raw.fb2")
+	req := httptest.NewRequest(http.MethodPost, u, strings.NewReader("rawdata"))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-WiFiFiles-Upload-ID", "hdr-id-1")
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	var result MobileUploadResult
+	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &result) != nil || result.Status != "uploaded" {
+		t.Fatalf("raw upload = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if data, err := os.ReadFile(filepath.Join(books, "raw.fb2")); err != nil || string(data) != "rawdata" {
+		t.Fatalf("raw file: %q %v", data, err)
+	}
+
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, u+"&upload_id=hdr-id-1", strings.NewReader("rawdata")))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("raw receipt retry = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/m/"+token+"/finish", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"indexed":1`) {
+		t.Fatalf("finish after upload = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestMobileUploadRenamedAndOversizeQueryID(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+	dup := filepath.Join(books, "dup.fb2")
+	if err := os.WriteFile(dup, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr, result := mobileUploadRequest(t, app, token, "r-1", "dup.fb2", "new-content")
+	if rr.Code != http.StatusOK || result.Status != "renamed" {
+		t.Fatalf("rename upload = %d %+v body=%s", rr.Code, result, rr.Body.String())
+	}
+	if result.StoredAs == "dup.fb2" {
+		t.Fatalf("rename kept original name: %+v", result)
+	}
+
+	rr, _ = mobileUploadRequest(t, app, token, strings.Repeat("x", 241), "ok.fb2", "data")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversize query upload_id = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestMobileRawUploadSpaceExceeded(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "edit")
+
+	u := "/m/" + token + "/upload?upload_id=s-1&name=" + url.QueryEscape("big.fb2")
+	req := httptest.NewRequest(http.MethodPost, u, strings.NewReader("data"))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = 1 << 60
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != 507 {
+		t.Fatalf("space exceeded = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestMobileUploadOneUnknownFieldAndMultipartID(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("other", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.WriteField("upload_id", "multi-id"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := mw.CreateFormFile("file", "m.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("m")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("multipart with unknown field = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(books, "m.fb2")); err != nil {
+		t.Fatalf("multipart file missing: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload?upload_id=multi-id", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("multipart receipt retry = %d body=%s", rr.Code, rr.Body.String())
+	}
+}

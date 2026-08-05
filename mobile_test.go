@@ -1164,9 +1164,95 @@ func TestMobileDownloadAllEmptyAndMissing(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("download-all missing dir = %d", rr.Code)
 	}
+
+	if err := os.MkdirAll(books, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(books, "book.fb2"), []byte("zip me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token+"/download-all", nil))
+	if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("download-all zip = %d ct=%q", rr.Code, rr.Header().Get("Content-Type"))
+	}
+	zr, err := zip.NewReader(bytes.NewReader(rr.Body.Bytes()), int64(rr.Body.Len()))
+	if err != nil || len(zr.File) != 1 || zr.File[0].Name != "book.fb2" {
+		t.Fatalf("zip parse err=%v files=%d", err, len(zr.File))
+	}
+}
+
+func TestMobileEditActionsForbiddenInSafeMode(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+
+	for _, action := range []string{"delete", "delete-all", "rename"} {
+		req := httptest.NewRequest(http.MethodPost, "/m/"+token+"/"+action, nil)
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s = %d body=%s", action, rr.Code, rr.Body.String())
+		}
+	}
+	for _, action := range []string{"download", "download-all"} {
+		req := httptest.NewRequest(http.MethodGet, "/m/"+token+"/"+action, nil)
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("%s = %d body=%s", action, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestMobileRenameBranches(t *testing.T) {
+	app, token, books := prepareMobileTest(t, "edit")
+
+	post := func(url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, url, nil)
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		return rr
+	}
+	loc := func(rr *httptest.ResponseRecorder) string {
+		u, err := url.Parse(rr.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("bad location %q: %v", rr.Header().Get("Location"), err)
+		}
+		return u.Query().Get("msg") + u.Query().Get("err")
+	}
+
+	rr := post("/m/" + token + "/rename?old=a.fb2&new=a.fb2")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(loc(rr), "не изменено") {
+		t.Fatalf("rename same = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("/m/" + token + "/rename?old=missing.fb2&new=x.fb2")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(loc(rr), "не найден") {
+		t.Fatalf("rename missing = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	if err := os.WriteFile(filepath.Join(books, "a.fb2"), []byte("a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(books, "b.fb2"), []byte("b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rr = post("/m/" + token + "/rename?old=a.fb2&new=b.fb2")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(loc(rr), "уже существует") {
+		t.Fatalf("rename conflict = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+
+	rr = post("/m/" + token + "/rename?old=a.fb2&new=c.fb2")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(loc(rr), "Переименовано") {
+		t.Fatalf("rename ok = %d loc=%q", rr.Code, rr.Header().Get("Location"))
+	}
+	if _, err := os.Stat(filepath.Join(books, "c.fb2")); err != nil {
+		t.Fatalf("renamed file missing: %v", err)
+	}
 }
 
 func TestMobileUploadMultipartNegativeBranches(t *testing.T) {
+
 	app, token, _ := prepareMobileTest(t, "safe")
 
 	post := func(body io.Reader, contentType string) *httptest.ResponseRecorder {

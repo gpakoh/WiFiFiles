@@ -192,6 +192,57 @@ func TestHandleUploadSuccessAndDuplicates(t *testing.T) {
 	}
 }
 
+func TestHandleUploadMoreBranches(t *testing.T) {
+	app := newTestWebApp(t)
+	internal := t.TempDir()
+	app.roots["internal"] = internal
+	app.roots["sd"] = t.TempDir()
+
+	post := func(body *bytes.Buffer, ct, url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", url, body)
+		req.Header.Set("Content-Type", ct)
+		rr := httptest.NewRecorder()
+		app.handleUpload(rr, req)
+		return rr
+	}
+
+	body, ct := multipartUploadBody(t, map[string]string{"other": "x"}, nil)
+	rr := post(body, ct, "/upload")
+	if rr.Code != http.StatusSeeOther || !strings.Contains(uploadLocationMsg(rr), "Файл не выбран") {
+		t.Fatalf("no files = %d msg=%q", rr.Code, uploadLocationMsg(rr))
+	}
+
+	body, ct = multipartUploadBody(t, map[string]string{"target": "internal"}, []string{"big.fb2"})
+	req := httptest.NewRequest("POST", "/upload", body)
+	req.Header.Set("Content-Type", ct)
+	req.ContentLength = 1 << 60
+	rr = httptest.NewRecorder()
+	app.handleUpload(rr, req)
+	if rr.Code != http.StatusSeeOther || uploadLocationMsg(rr) == "" {
+		t.Fatalf("space exceeded = %d msg=%q", rr.Code, uploadLocationMsg(rr))
+	}
+
+	dirName := "conflict.fb2"
+	if err := os.MkdirAll(filepath.Join(internal, dirName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	body, ct = multipartUploadBody(t, map[string]string{"target": "internal", "overwrite": "1"}, []string{dirName})
+	rr = post(body, ct, "/upload")
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("rename onto dir = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	body = &bytes.Buffer{}
+	body.WriteString("--X\r\nContent-Disposition: form-data; name=\"files\"; filename=\"a.fb2\"\r\n\r\ndata")
+	req = httptest.NewRequest("POST", "/upload?p=internal", body)
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=X")
+	rr = httptest.NewRecorder()
+	app.handleUpload(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("truncated body = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestEnsureRequestUploadSpaceVariants(t *testing.T) {
 	dir := t.TempDir()
 	if err := ensureRequestUploadSpace(dir, 1024); err != nil {

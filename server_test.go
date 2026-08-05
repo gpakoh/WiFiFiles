@@ -683,6 +683,18 @@ func TestApplyServicesVariants(t *testing.T) {
 		t.Fatalf("smb no-hash should demand password: %+v", sm)
 	}
 
+	app.cfg = Config{Username: "pb", SMBEnabled: true, SMBNTHash: "zz"}
+	sm.applyServices()
+	if !strings.Contains(sm.smbErr, "corrupted") {
+		t.Fatalf("smb bad hash: %+v", sm)
+	}
+
+	app.cfg = Config{Username: "pb", SMBEnabled: true, SMBNTHash: "00112233445566778899aabbccddeeff"}
+	sm.applyServices()
+	if !strings.Contains(sm.smbErr, "no storage") {
+		t.Fatalf("smb no storage: %+v", sm)
+	}
+
 	app.cfg = Config{Username: "pb"}
 	sm.applyServices()
 	if sm.httpErr != "" || sm.ftpErr != "" {

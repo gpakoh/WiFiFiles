@@ -530,12 +530,12 @@ func TestLoadOrCreateConfigVariants(t *testing.T) {
 	app.cfgMu.RUnlock()
 
 	v1 := Config{
-		ConfigVersion: 1,
-		Username:      "pocketbook",
-		PasswordHash:  "hash",
-		Port:          99,
+		ConfigVersion:   1,
+		Username:        "pocketbook",
+		PasswordHash:    "hash",
+		Port:            99,
 		InternalEnabled: true,
-		SDEnabled:     true,
+		SDEnabled:       true,
 	}
 	data, _ := json.Marshal(v1)
 	cfgPath2 := filepath.Join(dir, "v1.json")
@@ -699,5 +699,47 @@ func TestApplyServicesVariants(t *testing.T) {
 	sm.applyServices()
 	if sm.httpErr != "" || sm.ftpErr != "" {
 		t.Fatalf("errors not cleared when disabled: %+v", sm)
+	}
+}
+
+func TestBreadcrumbAndDestinationDepthBranches(t *testing.T) {
+	if items := breadcrumbItems(""); items != nil {
+		t.Fatalf("breadcrumbItems(\"\") = %v", items)
+	}
+	items := breadcrumbItems("sd/Books/Sci-Fi")
+	if len(items) != 3 || items[0].Label != "SD card" {
+		t.Fatalf("breadcrumbItems(sd/...) = %+v", items)
+	}
+
+	root := t.TempDir()
+	deep := root
+	for i := 0; i < 14; i++ {
+		deep = filepath.Join(deep, "d"+fmt.Sprint(i))
+	}
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		roots: map[string]string{"internal": root, "sd": filepath.Join(root, "missing-sd")},
+		cfg:   Config{InternalEnabled: true},
+	}
+	dests := app.uploadDestinations("")
+	var maxDepthSeen int
+	for _, d := range dests {
+		if n := strings.Count(strings.TrimPrefix(d.Path, "internal/"), "/"); n > maxDepthSeen {
+			maxDepthSeen = n
+		}
+	}
+	if maxDepthSeen < 11 {
+		t.Fatalf("expected deep destinations, max depth = %d", maxDepthSeen)
+	}
+
+	app2 := &App{
+		roots: map[string]string{"internal": root},
+		cfg:   Config{InternalEnabled: true, DefaultTarget: "internal/nowhere"},
+	}
+	dests2 := app2.uploadDestinations("internal/nowhere")
+	if len(dests2) == 0 || !dests2[0].Selected || dests2[0].Path != "internal/nowhere" {
+		t.Fatalf("current-not-found prepend = %+v", dests2)
 	}
 }

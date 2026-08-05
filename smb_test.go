@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 	"testing"
+	"time"
 
 	smbntlm "github.com/sonroyaalmerol/go-smb-server/smb/ntlmssp"
 	smbvfs "github.com/sonroyaalmerol/go-smb-server/smb/vfs"
@@ -314,4 +314,25 @@ func TestSMBEnumerateStopAndErrors(t *testing.T) {
 	if _, err := b.Open(ctx, smbvfs.OpenOptions{Path: "missing", Disposition: smbvfs.DispositionOpen}); err == nil {
 		t.Fatal("open missing dir accepted")
 	}
+}
+
+func TestSMBRenameMissingParentAndEnumerateFilter(t *testing.T) {
+	b, root := newTestSMB(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(filepath.Join(root, "Books"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	h, err := b.Open(ctx, smbvfs.OpenOptions{Path: "Books/novel.txt", Disposition: smbvfs.DispositionOverwriteIf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "Books", "taken.txt"), []byte("y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.(smbvfs.Renamer).Rename(ctx, "taken.txt", false); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("rename onto existing no-replace = %v", err)
+	}
+	_ = h.Close(ctx)
+
 }

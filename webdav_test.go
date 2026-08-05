@@ -1538,3 +1538,82 @@ func TestHandleCopyMissingParentAndSymlinkSrc(t *testing.T) {
 		t.Fatalf("copy symlink src = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestWebDAVServeHTTPAndPropfindBranches(t *testing.T) {
+	dav, internal := newTestDAV(t)
+
+	rr := davRequest(t, dav, http.MethodGet, "http://pb/foo", "", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("non-dav path = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "PATCH", "http://pb/dav/internal/", "", nil)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PATCH = %d", rr.Code)
+	}
+
+	rr = davRequest(t, dav, "PROPFIND", "http://pb/dav/internal/", "", nil)
+	if rr.Code != 207 {
+		t.Fatalf("propfind no depth = %d", rr.Code)
+	}
+
+	for _, name := range []string{"beta.txt", "gamma.txt"} {
+		if err := os.WriteFile(filepath.Join(internal, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(internal, "Alpha"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	rr = davRequest(t, dav, "PROPFIND", "http://pb/dav/internal/", "", map[string]string{"Depth": "1"})
+	if rr.Code != 207 || !strings.Contains(rr.Body.String(), "Alpha") || !strings.Contains(rr.Body.String(), "beta.txt") || !strings.Contains(rr.Body.String(), "gamma.txt") {
+		t.Fatalf("propfind depth1 = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestWebDAVMoveCopyBranches(t *testing.T) {
+	dav, internal := newTestDAV(t)
+	if err := os.WriteFile(filepath.Join(internal, "a.txt"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(internal, "Books"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(internal, "Books", "inner.txt"), []byte("inner"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(internal, "src.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(internal, "Books", "dst.txt"), []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rr := davRequest(t, dav, "COPY", "http://pb/dav/internal/src.txt", "", map[string]string{"Destination": "http://pb/dav/internal/Books/dst.txt", "Overwrite": "T"})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("copy overwrite existing = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = davRequest(t, dav, "COPY", "http://pb/dav/internal/Books", "", map[string]string{"Destination": "http://pb/dav/internal/shallow", "Depth": "0"})
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("copy depth0 = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(internal, "shallow", "inner.txt")); !os.IsNotExist(err) {
+		t.Fatalf("depth0 copied children: %v", err)
+	}
+}
+
+func TestWebDAVLockBranches(t *testing.T) {
+	dav, _ := newTestDAV(t)
+
+	rr := davRequest(t, dav, "LOCK", "http://pb/dav/internal/new.fb2", "", map[string]string{"Timeout": "Second-1"})
+	if rr.Code != http.StatusCreated || !strings.Contains(rr.Header().Get("Lock-Token"), "opaquelocktoken:") {
+		t.Fatalf("lock missing file = %d %s", rr.Code, rr.Header().Get("Lock-Token"))
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	rr = davRequest(t, dav, "LOCK", "http://pb/dav/internal/new.fb2", "", map[string]string{"Timeout": "Second-3600"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("lock after expired = %d body=%s", rr.Code, rr.Body.String())
+	}
+}

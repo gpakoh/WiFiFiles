@@ -1698,3 +1698,83 @@ func TestMobileUploadOneUnknownFieldAndMultipartID(t *testing.T) {
 		t.Fatalf("multipart receipt retry = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestMobileUploadOneMoreBranches(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "edit")
+
+	rr, _ := mobileUploadRequest(t, app, token, "", "ok.fb2", "data")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("empty multipart upload_id = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := mw.WriteField("upload_id", "ignored-in-field"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := mw.CreateFormFile("file", "hdr.fb2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, "data"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload?upload_id="+strings.Repeat("x", 241), &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	app.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversize query upload_id multipart = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload?name=ignored", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-WiFiFiles-Upload-ID", "hdr-id")
+	rec = httptest.NewRecorder()
+	app.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("header + multipart upload_id = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.ContentLength = 1 << 60
+	rec = httptest.NewRecorder()
+	app.routes().ServeHTTP(rec, req)
+	if rec.Code != 507 {
+		t.Fatalf("multipart space exceeded = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	truncated := "--X\r\nContent-Disposition: form-data; name=\"upload_id\"\r\n\r\ns-9\r\n--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"cut.fb2\"\r\nContent-Type: application/octet-stream\r\n\r\npartial"
+	req = httptest.NewRequest(http.MethodPost, "/m/"+token+"/upload", strings.NewReader(truncated))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=X")
+	rec = httptest.NewRecorder()
+	app.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("truncated multipart = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMobileUploadLimitReached(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "edit")
+	app.mobileMu.Lock()
+	results := make(map[string]MobileUploadResult)
+	for i := 0; i < maxMobileFilesPerToken; i++ {
+		results[fmt.Sprintf("id-%d", i)] = MobileUploadResult{Status: "uploaded"}
+	}
+	app.mobileReceipts[token] = results
+	app.mobileMu.Unlock()
+
+	rr, _ := mobileRawUploadRequest(t, app, token, "limit-raw", "one.fb2", []byte("x"))
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("raw over limit = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr, _ = mobileUploadRequest(t, app, token, "limit-mp", "two.fb2", "data")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("multipart over limit = %d body=%s", rr.Code, rr.Body.String())
+	}
+}

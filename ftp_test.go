@@ -854,3 +854,28 @@ func TestFTPStoreAndDirOpBranches(t *testing.T) {
 		t.Fatalf("MDTM bad path = %q", got)
 	}
 }
+
+func TestFTPListAndMLSTVariants(t *testing.T) {
+	app, port := ftpTestServer(t)
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("MLST /internal/missing.fb2"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("MLST missing = %q", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join(app.roots["internal"], "zeta"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(app.roots["internal"], "alpha.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	conn := c.passive(t)
+	if got := c.cmd("NLST /internal"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("NLST = %q", got)
+	}
+	_ = conn.Close()
+	if got := c.reply(); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("NLST reply = %q", got)
+	}
+}

@@ -184,6 +184,7 @@ static const char FOLDER_LIST_PATH[] = "/tmp/WiFiFiles/native_folder_list.ini";
 static const char MOBILE_REQUEST_PATH[] = "/tmp/WiFiFiles/native_mobile_request.ini";
 static const char MOBILE_QR_PATH[] = "/tmp/WiFiFiles/native_mobile_qr.ini";
 static const char MOBILE_DEFAULT_PATH[] = "/tmp/WiFiFiles/native_mobile_default.ini";
+static const char UPDATE_STATUS_PATH[] = "/tmp/WiFiFiles/update_status.ini";
 
 struct app_state {
     int running;
@@ -749,6 +750,8 @@ static int screen_mode = 0;
 static int language_return_mode = 0;
 static int instruction_index = 0;
 static int instruction_page = 0;
+static int settings_picker_mode = 0;
+static char update_latest[32];
 
 #define LANG_RU 0
 #define LANG_EN 1
@@ -762,11 +765,12 @@ static int instruction_page = 0;
 #define MODE_FOLDER_PICKER 5
 #define MODE_QR_MODE 6
 #define MODE_QR 7
-#define MAIN_ROW_COUNT 12
-#define MAIN_STOP 12
-#define MAIN_PHONE 13
-#define MAIN_REFRESH 14
-#define MAIN_START 15
+#define MODE_SETTINGS 8
+#define MAIN_ROW_COUNT 13
+#define MAIN_STOP 13
+#define MAIN_PHONE 14
+#define MAIN_REFRESH 15
+#define MAIN_START 16
 #define STORAGE_BACK 2
 #define STORAGE_DEFAULT 3
 #define STORAGE_RECENT1 4
@@ -1298,6 +1302,7 @@ static void draw_main_row_idx(int idx) {
     }
     else if (idx == 10) { make_onoff(val, sizeof(val), st.logging_enabled); draw_row(10, y, L("Ведение логов", "Logging", "Journalisation", "Protokollierung"), val, 0); }
     else if (idx == 11) draw_row(11, y, L("Инструкции", "Instructions", "Instructions", "Anleitungen"), lang_label(), 0);
+    else if (idx == 12) draw_row(12, y, L("Настройки", "Settings", "Réglages", "Einstellungen"), "", 0);
 }
 
 static void draw_main_action_idx(int idx) {
@@ -1317,7 +1322,7 @@ static void draw_main(void) {
     draw_header("WiFiFiles 0.7.23");
     draw_main_status();
     for (i = 0; i < MAIN_ROW_COUNT; i++) draw_main_row_idx(i);
-    if (st.message[0]) draw_text(font_help, 22, 839, screen_w - 44, 98, st.message, ALIGN_CENTER | VALIGN_MIDDLE | DOTS);
+    if (st.message[0]) draw_text(font_help, 22, 879, screen_w - 44, 72, st.message, ALIGN_CENTER | VALIGN_MIDDLE | DOTS);
     draw_main_action_idx(MAIN_STOP); draw_main_action_idx(MAIN_PHONE); draw_main_action_idx(MAIN_REFRESH); draw_main_action_idx(MAIN_START);
     finish_screen_update();
 }
@@ -1577,7 +1582,6 @@ static int instruction_layout(int *page_start, int *page_count_blocks) {
 
 static void draw_instruction_menu(void) {
     int y = 118, i, by = screen_h - 72;
-    int center_x = 246, center_w = screen_w - 492;
     ClearScreen(); draw_header(L("Инструкции", "Instructions", "Instructions", "Anleitungen"));
     draw_text(font_main, 24, 76, screen_w - 48, 34,
         L("Выберите способ подключения", "Choose a connection method", "Choisissez une méthode de connexion", "Verbindungsmethode wählen"),
@@ -1591,8 +1595,7 @@ static void draw_instruction_menu(void) {
         y += 142;
     }
     draw_action(4, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
-    draw_action(5, center_x, by, center_w, 54, instruction_font_label(), 0);
-    draw_action(6, screen_w - 238, by, 220, 54, L("ЯЗЫК", "LANGUAGE", "LANGUE", "SPRACHE"), 0);
+    draw_action(5, screen_w - 238, by, 220, 54, instruction_font_label(), 0);
     finish_screen_update();
 }
 
@@ -1654,13 +1657,23 @@ static void draw_storage_picker(void) {
     char default_label[320];
     int y = 220, by = screen_h - 72;
     ClearScreen();
-    draw_header(L("Передача с телефона по QR-коду", "Phone transfer by QR code", "Transfert depuis un téléphone par code QR", "Übertragung vom Telefon per QR-Code"));
-    draw_text(font_main, 34, 92, screen_w - 68, 92,
-        L("Сначала выберите память. На следующем экране можно открыть любую папку и указать, куда сохранять книги.",
-          "First choose the storage. On the next screen you can open any folder and select where books will be saved.",
-          "Choisissez d'abord la mémoire. À l'écran suivant, vous pourrez ouvrir n'importe quel dossier et choisir où enregistrer les livres.",
-          "Wählen Sie zuerst den Speicher. Im nächsten Bildschirm können Sie jeden Ordner öffnen und als Ziel auswählen."),
-        ALIGN_CENTER | VALIGN_MIDDLE);
+    if (settings_picker_mode) {
+        draw_header(L("Настройки — папка по умолчанию", "Settings — default folder", "Réglages — dossier par défaut", "Einstellungen — Standardordner"));
+        draw_text(font_main, 34, 92, screen_w - 68, 92,
+            L("Выберите память. На следующем экране откройте папку, которая станет папкой по умолчанию.",
+              "Choose the storage. On the next screen open the folder that will become the default folder.",
+              "Choisissez la mémoire. À l'écran suivant, ouvrez le dossier qui deviendra le dossier par défaut.",
+              "Wählen Sie den Speicher. Öffnen Sie im nächsten Bildschirm den Ordner, der zum Standardordner wird."),
+            ALIGN_CENTER | VALIGN_MIDDLE);
+    } else {
+        draw_header(L("Передача с телефона по QR-коду", "Phone transfer by QR code", "Transfert depuis un téléphone par code QR", "Übertragung vom Telefon per QR-Code"));
+        draw_text(font_main, 34, 92, screen_w - 68, 92,
+            L("Сначала выберите память. На следующем экране можно открыть любую папку и указать, куда сохранять книги.",
+              "First choose the storage. On the next screen you can open any folder and select where books will be saved.",
+              "Choisissez d'abord la mémoire. À l'écran suivant, vous pourrez ouvrir n'importe quel dossier et choisir où enregistrer les livres.",
+              "Wählen Sie zuerst den Speicher. Im nächsten Bildschirm können Sie jeden Ordner öffnen und als Ziel auswählen."),
+            ALIGN_CENTER | VALIGN_MIDDLE);
+    }
     draw_row(0, y, L("Память ридера", "Reader storage", "Mémoire du lecteur", "Reader-Speicher"), st.internal_enabled ? ">" : L("ВЫКЛ", "OFF", "DÉSACTIVÉ", "AUS"), !st.internal_enabled);
     if (st.internal_enabled && st.free_internal[0]) {
         char free_label[96];
@@ -1677,28 +1690,30 @@ static void draw_storage_picker(void) {
         scat(free_label, sizeof(free_label), st.free_sd);
         draw_text(font_help, 34, y + 114, screen_w - 68, 22, free_label, ALIGN_LEFT | VALIGN_MIDDLE);
     }
-    if (st.default_target[0]) {
-        char path_label[280];
-        virtual_path_label(st.default_target, path_label, sizeof(path_label));
-        default_label[0] = 0;
-        scat(default_label, sizeof(default_label), L("По умолчанию: ", "Default: ", "Par défaut : ", "Standard: "));
-        scat(default_label, sizeof(default_label), path_label);
-        draw_row(STORAGE_DEFAULT, y + 140, default_label, ">", 0);
-    }
-    {
-        int i, rows = 0;
-        for (i = 0; i < 4; i++) if (st.recent_targets[i][0]) rows = i + 1;
-        if (rows > 0) {
-            char recent_label[320];
-            draw_text(font_help, 34, y + 192, screen_w - 68, 24,
-                L("Недавние: ", "Recent: ", "Récents : ", "Zuletzt: "), ALIGN_LEFT | VALIGN_MIDDLE);
-            for (i = 0; i < rows; i++) {
-                char path_label[280];
-                virtual_path_label(st.recent_targets[i], path_label, sizeof(path_label));
-                recent_label[0] = 0;
-                scat(recent_label, sizeof(recent_label), "· ");
-                scat(recent_label, sizeof(recent_label), path_label);
-                draw_row(STORAGE_RECENT1 + i, y + 214 + i * 70, recent_label, ">", 0);
+    if (!settings_picker_mode) {
+        if (st.default_target[0]) {
+            char path_label[280];
+            virtual_path_label(st.default_target, path_label, sizeof(path_label));
+            default_label[0] = 0;
+            scat(default_label, sizeof(default_label), L("По умолчанию: ", "Default: ", "Par défaut : ", "Standard: "));
+            scat(default_label, sizeof(default_label), path_label);
+            draw_row(STORAGE_DEFAULT, y + 140, default_label, ">", 0);
+        }
+        {
+            int i, rows = 0;
+            for (i = 0; i < 4; i++) if (st.recent_targets[i][0]) rows = i + 1;
+            if (rows > 0) {
+                char recent_label[320];
+                draw_text(font_help, 34, y + 192, screen_w - 68, 24,
+                    L("Недавние: ", "Recent: ", "Récents : ", "Zuletzt: "), ALIGN_LEFT | VALIGN_MIDDLE);
+                for (i = 0; i < rows; i++) {
+                    char path_label[280];
+                    virtual_path_label(st.recent_targets[i], path_label, sizeof(path_label));
+                    recent_label[0] = 0;
+                    scat(recent_label, sizeof(recent_label), "· ");
+                    scat(recent_label, sizeof(recent_label), path_label);
+                    draw_row(STORAGE_RECENT1 + i, y + 214 + i * 70, recent_label, ">", 0);
+                }
             }
         }
     }
@@ -1825,6 +1840,67 @@ static void draw_qr_screen(void) {
     finish_screen_update();
 }
 
+static void draw_settings(void) {
+    char val[280], label[96];
+    int y = 210, by = screen_h - 72;
+    ClearScreen();
+    draw_header(L("Настройки", "Settings", "Réglages", "Einstellungen"));
+    draw_row(0, y, L("Язык", "Language", "Langue", "Sprache"), lang_label(), 0);
+    if (st.default_target[0]) virtual_path_label(st.default_target, val, sizeof(val));
+    else scopy(val, sizeof(val), L("—", "—", "—", "—"));
+    draw_row(1, y + 70, L("Папка по умолчанию", "Default folder", "Dossier par défaut", "Standardordner"), val, 0);
+    if (update_latest[0]) {
+        scopy(label, sizeof(label), L("Обновить до ", "Update to ", "Mettre à jour vers ", "Aktualisieren auf "));
+        scat(label, sizeof(label), update_latest);
+    } else {
+        scopy(label, sizeof(label), L("Проверить обновления", "Check for updates", "Rechercher des mises à jour", "Nach Updates suchen"));
+    }
+    draw_row(2, y + 140, label, "", 0);
+    draw_action(3, 18, by, 220, 54, L("НАЗАД", "BACK", "RETOUR", "ZURÜCK"), 0);
+    finish_screen_update();
+}
+
+static void run_update_action(void) {
+    char data[1536];
+    char status[16], latest[32], message[512];
+    ShowHourglass();
+    run_helper(update_latest[0] ? "--native-update-install" : "--native-update-check");
+    HideHourglass();
+    status[0] = latest[0] = message[0] = 0;
+    if (read_all(UPDATE_STATUS_PATH, data, sizeof(data)) < 0) {
+        Message(ICON_ERROR, L("Обновления", "Updates", "Mises à jour", "Updates"),
+            L("Не удалось проверить обновления", "Update check failed", "Échec de la recherche de mises à jour", "Update-Prüfung fehlgeschlagen"), 3600);
+        return;
+    }
+    ini_value(data, "status", status, sizeof(status));
+    ini_value(data, "latest", latest, sizeof(latest));
+    ini_value(data, "message", message, sizeof(message));
+    if (seq(status, "latest")) {
+        update_latest[0] = 0;
+        Message(ICON_INFORMATION, L("Обновления", "Updates", "Mises à jour", "Updates"),
+            L("Установлена последняя версия", "The latest version is installed", "La dernière version est installée", "Die neueste Version ist installiert"), 3000);
+    } else if (seq(status, "found")) {
+        char msg[160];
+        scopy(update_latest, sizeof(update_latest), latest);
+        scopy(msg, sizeof(msg), L("Доступна версия ", "Version ", "Version ", "Version "));
+        scat(msg, sizeof(msg), latest);
+        scat(msg, sizeof(msg), L(". Нажмите ещё раз, чтобы обновить.", ". Press again to update.", ". Appuyez à nouveau pour mettre à jour.", ". Erneut drücken, um zu aktualisieren."));
+        Message(ICON_INFORMATION, L("Обновления", "Updates", "Mises à jour", "Updates"), msg, 4200);
+    } else if (seq(status, "updated")) {
+        char msg[160];
+        update_latest[0] = 0;
+        scopy(msg, sizeof(msg), L("Обновлено до версии ", "Updated to version ", "Mis à jour vers la version ", "Aktualisiert auf Version "));
+        scat(msg, sizeof(msg), latest);
+        scat(msg, sizeof(msg), L(". Закройте и снова откройте приложение.", ". Close and reopen the app.", ". Fermez puis rouvrez l'application.", ". App schließen und neu öffnen."));
+        Message(ICON_INFORMATION, L("Обновления", "Updates", "Mises à jour", "Updates"), msg, 4200);
+    } else {
+        update_latest[0] = 0;
+        Message(ICON_ERROR, L("Обновления", "Updates", "Mises à jour", "Updates"),
+            message[0] ? message : L("Ошибка обновления", "Update error", "Erreur de mise à jour", "Update-Fehler"), 4200);
+    }
+    draw_current();
+}
+
 static void draw_current(void) {
     if (screen_mode == MODE_LANGUAGE) draw_language();
     else if (screen_mode == MODE_INSTRUCTIONS) draw_instruction_menu();
@@ -1833,6 +1909,7 @@ static void draw_current(void) {
     else if (screen_mode == MODE_FOLDER_PICKER) draw_folder_picker();
     else if (screen_mode == MODE_QR_MODE) draw_qr_mode();
     else if (screen_mode == MODE_QR) draw_qr_screen();
+    else if (screen_mode == MODE_SETTINGS) draw_settings();
     else draw_main();
 }
 
@@ -2113,6 +2190,7 @@ static void activate_main(int idx) {
         case 9: open_edit(2); return;
         case 10: st.logging_enabled = !st.logging_enabled; dirty = 1; partial_main_item(10); partial_main_status(); return;
         case 11: instruction_page = 0; screen_mode = MODE_INSTRUCTIONS; selected = 0; draw_current(); return;
+        case 12: settings_picker_mode = 0; screen_mode = MODE_SETTINGS; selected = 0; draw_current(); return;
         case MAIN_STOP: stop_services(); return;
         case MAIN_PHONE: open_phone_flow(); return;
         case MAIN_REFRESH: refresh_state(); return;
@@ -2129,7 +2207,6 @@ static void activate_current(int idx) {
         if (idx >= 0 && idx < 4) { instruction_index = idx; instruction_page = 0; screen_mode = MODE_INSTRUCTION_DETAIL; selected = 2; draw_current(); }
         else if (idx == 4) { screen_mode = MODE_MAIN; selected = 11; draw_current(); }
         else if (idx == 5) { cycle_instruction_font(); }
-        else if (idx == 6) { language_return_mode = MODE_INSTRUCTIONS; screen_mode = MODE_LANGUAGE; selected = current_lang; draw_current(); }
         return;
     }
     if (screen_mode == MODE_INSTRUCTION_DETAIL) {
@@ -2140,6 +2217,13 @@ static void activate_current(int idx) {
         else if (idx == 2 && instruction_page < pages - 1) { instruction_page++; selected = 1; draw_current(); }
         return;
     }
+    if (screen_mode == MODE_SETTINGS) {
+        if (idx == 0) { language_return_mode = MODE_SETTINGS; screen_mode = MODE_LANGUAGE; selected = current_lang; draw_current(); }
+        else if (idx == 1) { settings_picker_mode = 1; screen_mode = MODE_STORAGE_PICKER; selected = st.internal_enabled ? 0 : 1; draw_current(); }
+        else if (idx == 2) run_update_action();
+        else if (idx == 3) { screen_mode = MODE_MAIN; selected = 12; draw_current(); }
+        return;
+    }
     if (screen_mode == MODE_STORAGE_PICKER) {
         if (idx == 0) {
             if (!st.internal_enabled) Message(ICON_WARNING, L("Память", "Storage", "Mémoire", "Speicher"), L("Внутренняя память отключена в настройках", "Reader storage is disabled in settings", "La mémoire du lecteur est désactivée dans les réglages", "Der Reader-Speicher ist in den Einstellungen deaktiviert"), 2800);
@@ -2147,33 +2231,47 @@ static void activate_current(int idx) {
         } else if (idx == 1) {
             if (!st.sd_enabled) Message(ICON_WARNING, L("Память", "Storage", "Mémoire", "Speicher"), L("Карта SD отключена в настройках", "The SD card is disabled in settings", "La carte SD est désactivée dans les réglages", "Die SD-Karte ist in den Einstellungen deaktiviert"), 2800);
             else open_folder_path("sd");
-        } else if (idx == STORAGE_DEFAULT && st.default_target[0]) {
+        } else if (idx == STORAGE_DEFAULT && st.default_target[0] && !settings_picker_mode) {
             scopy(folder_current, sizeof(folder_current), st.default_target);
             folder_picker_skip = 1;
             if (request_folder_list(folder_current) == 0) { screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current(); }
             else { Message(ICON_ERROR, L("Папка", "Folder", "Dossier", "Ordner"), folder_error[0] ? folder_error : L("Не удалось открыть папку", "Cannot open the folder", "Impossible d’ouvrir le dossier", "Ordner konnte nicht geöffnet werden"), 3400); folder_picker_skip = 0; }
-        } else if (idx >= STORAGE_RECENT1 && idx <= STORAGE_RECENT4 && st.recent_targets[idx - STORAGE_RECENT1][0]) {
+        } else if (idx >= STORAGE_RECENT1 && idx <= STORAGE_RECENT4 && st.recent_targets[idx - STORAGE_RECENT1][0] && !settings_picker_mode) {
             scopy(folder_current, sizeof(folder_current), st.recent_targets[idx - STORAGE_RECENT1]);
             folder_picker_skip = 1;
             if (request_folder_list(folder_current) == 0) { screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current(); }
             else { Message(ICON_ERROR, L("Папка", "Folder", "Dossier", "Ordner"), folder_error[0] ? folder_error : L("Не удалось открыть папку", "Cannot open the folder", "Impossible d’ouvrir le dossier", "Ordner konnte nicht geöffnet werden"), 3400); folder_picker_skip = 0; }
-        } else if (idx == STORAGE_BACK) { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
+        } else if (idx == STORAGE_BACK) {
+            if (settings_picker_mode) { settings_picker_mode = 0; screen_mode = MODE_SETTINGS; selected = 1; draw_current(); }
+            else { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
+        }
         return;
     }
     if (screen_mode == MODE_FOLDER_PICKER) {
         int visible = folder_visible_count();
         int start = folder_page * FOLDER_PAGE_SIZE;
         if (idx == 0) {
-            screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+            if (settings_picker_mode) {
+                save_default_target(folder_current);
+                Message(ICON_INFORMATION, "WiFiFiles",
+                    L("Путь по умолчанию сохранён", "Default path saved", "Chemin par défaut enregistré", "Standardpfad gespeichert"), 2600);
+                settings_picker_mode = 0;
+                screen_mode = MODE_SETTINGS; selected = 1; draw_current();
+            } else {
+                screen_mode = MODE_QR_MODE; selected = QR_MODE_SAFE; draw_current();
+            }
         } else if (idx == FOLDER_REMEMBER) {
             save_default_target(folder_current);
             Message(ICON_INFORMATION, "WiFiFiles",
                 L("Путь по умолчанию сохранён", "Default path saved", "Chemin par défaut enregistré", "Standardpfad gespeichert"), 2600);
-            draw_current();
+            if (settings_picker_mode) { settings_picker_mode = 0; screen_mode = MODE_SETTINGS; selected = 1; draw_current(); }
+            else draw_current();
         } else if (idx >= 1 && idx <= visible) {
             open_folder_path(folder_dirs[start + idx - 1]);
-        } else if (idx == FOLDER_BACK) { screen_mode = MODE_STORAGE_PICKER; selected = starts(folder_current, "sd") ? 1 : 0; draw_current(); }
-        else if (idx == FOLDER_UP && folder_parent[0]) open_folder_path(folder_parent);
+        } else if (idx == FOLDER_BACK) {
+            if (settings_picker_mode) { screen_mode = MODE_STORAGE_PICKER; selected = 1; draw_current(); }
+            else { screen_mode = MODE_STORAGE_PICKER; selected = starts(folder_current, "sd") ? 1 : 0; draw_current(); }
+        } else if (idx == FOLDER_UP && folder_parent[0]) open_folder_path(folder_parent);
         else if (idx == FOLDER_PREV && folder_page > 0) { folder_page--; selected = 0; draw_current(); }
         else if (idx == FOLDER_NEXT && start + visible < folder_count) { folder_page++; selected = 0; draw_current(); }
         return;
@@ -2229,7 +2327,6 @@ static int current_item_from_y(int x, int y) {
         for (i = 0; i < 4; i++) { int yy = 118 + i * 142; if (y >= yy && y < yy + 128) return i; }
         if (y >= screen_h - 72) {
             if (x < 246) return 4;
-            if (x > screen_w - 246) return 6;
             return 5;
         }
         return -1;
@@ -2239,14 +2336,23 @@ static int current_item_from_y(int x, int y) {
         if (x >= (screen_w - 210) / 2 && x < (screen_w + 210) / 2) return 1;
         if (x > screen_w - 238) return 2;
     }
+    if (screen_mode == MODE_SETTINGS) {
+        if (y >= 210 && y < 255) return 0;
+        if (y >= 280 && y < 325) return 1;
+        if (y >= 350 && y < 395) return 2;
+        if (y >= screen_h - 72 && x >= 18 && x < 238) return 3;
+        return -1;
+    }
     if (screen_mode == MODE_STORAGE_PICKER) {
         if (y >= 220 && y < 265) return 0;
         if (y >= 290 && y < 335) return 1;
-        if (st.default_target[0] && y >= 360 && y < 405) return STORAGE_DEFAULT;
-        if (y >= 434 && y < 479) return STORAGE_RECENT1;
-        if (y >= 504 && y < 549) return STORAGE_RECENT2;
-        if (y >= 574 && y < 619) return STORAGE_RECENT3;
-        if (y >= 644 && y < 689) return STORAGE_RECENT4;
+        if (!settings_picker_mode) {
+            if (st.default_target[0] && y >= 360 && y < 405) return STORAGE_DEFAULT;
+            if (y >= 434 && y < 479) return STORAGE_RECENT1;
+            if (y >= 504 && y < 549) return STORAGE_RECENT2;
+            if (y >= 574 && y < 619) return STORAGE_RECENT3;
+            if (y >= 644 && y < 689) return STORAGE_RECENT4;
+        }
         if (y >= screen_h - 72 && x >= 18 && x < 238) return STORAGE_BACK;
         return -1;
     }
@@ -2282,9 +2388,13 @@ static int current_item_from_y(int x, int y) {
 }
 static int max_selected(void) {
     if (screen_mode == MODE_LANGUAGE) return st.language[0] ? 4 : 3;
-    if (screen_mode == MODE_INSTRUCTIONS) return 6;
+    if (screen_mode == MODE_INSTRUCTIONS) return 5;
     if (screen_mode == MODE_INSTRUCTION_DETAIL) return 2;
-    if (screen_mode == MODE_STORAGE_PICKER) return st.default_target[0] ? STORAGE_DEFAULT : STORAGE_BACK;
+    if (screen_mode == MODE_STORAGE_PICKER) {
+        if (settings_picker_mode) return STORAGE_BACK;
+        return st.default_target[0] ? STORAGE_DEFAULT : STORAGE_BACK;
+    }
+    if (screen_mode == MODE_SETTINGS) return 3;
     if (screen_mode == MODE_FOLDER_PICKER) return FOLDER_REMEMBER;
     if (screen_mode == MODE_QR_MODE) return QR_MODE_BACK;
     if (screen_mode == MODE_QR) return QR_CHANGE_FOLDER;
@@ -2301,8 +2411,12 @@ static void handle_back(void) {
     else if (screen_mode == MODE_LANGUAGE && st.language[0]) { screen_mode = language_return_mode; selected = 0; draw_current(); }
     else if (screen_mode == MODE_QR) { screen_mode = MODE_QR_MODE; selected = seq(qr_access_mode, "edit") ? QR_MODE_EDIT : QR_MODE_SAFE; draw_current(); }
     else if (screen_mode == MODE_QR_MODE) { screen_mode = MODE_FOLDER_PICKER; selected = 0; draw_current(); }
-    else if (screen_mode == MODE_FOLDER_PICKER) { screen_mode = MODE_STORAGE_PICKER; selected = starts(folder_current, "sd") ? 1 : 0; draw_current(); }
-    else if (screen_mode == MODE_STORAGE_PICKER) { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
+    else if (screen_mode == MODE_FOLDER_PICKER) { screen_mode = MODE_STORAGE_PICKER; selected = settings_picker_mode ? 1 : (starts(folder_current, "sd") ? 1 : 0); draw_current(); }
+    else if (screen_mode == MODE_STORAGE_PICKER) {
+        if (settings_picker_mode) { settings_picker_mode = 0; screen_mode = MODE_SETTINGS; selected = 1; draw_current(); }
+        else { screen_mode = MODE_MAIN; selected = MAIN_PHONE; draw_current(); }
+    }
+    else if (screen_mode == MODE_SETTINGS) { screen_mode = MODE_MAIN; selected = 12; draw_current(); }
     else CloseApp();
 }
 

@@ -255,6 +255,12 @@ func main() {
 		case "--native-mobile-default-save":
 			nativeSaveDefaultTarget(appDir)
 			return
+		case "--native-update-check":
+			nativeUpdateCheck(appDir)
+			return
+		case "--native-update-install":
+			nativeUpdateInstall(appDir)
+			return
 		case "--serve": // compatibility with 0.1.x
 			runServer(appDir)
 			return

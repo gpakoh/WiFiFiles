@@ -18,7 +18,7 @@ jobs:
 
       - name: Test
         run: |
-          sudo -E go test -v -count=1 -coverprofile=coverage.out $(ls *.go | grep -v _test) $(ls *_test.go)
+          sudo -E env "PATH=$PATH" go test -v -count=1 -coverprofile=coverage.out $(ls *.go | grep -v _test) $(ls *_test.go)
           go tool cover -func=coverage.out | tail -1
 
       - name: Coverage gate

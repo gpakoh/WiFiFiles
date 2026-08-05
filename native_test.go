@@ -842,6 +842,9 @@ func TestLaunchPocketBookBrowserNotFound(t *testing.T) {
 }
 
 func TestLaunchPocketBookBrowserSuccess(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create /ebrmain")
+	}
 	if _, err := os.Stat("/ebrmain"); err == nil {
 		t.Skip("/ebrmain exists on this host; refusing to touch it")
 	}

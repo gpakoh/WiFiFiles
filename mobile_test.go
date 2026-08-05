@@ -44,7 +44,7 @@ func prepareMobileTest(t *testing.T, mode string) (*App, string, string) {
 	app.roots["internal"] = internal
 	app.roots["sd"] = sd
 	token := "0123456789abcdef"
-	record := MobileTokenRecord{Token: token, Target: "internal/Books", Mode: mode, Expires: time.Now().Add(time.Minute).Unix()}
+	record := MobileTokenRecord{Token: token, Target: "internal/Books", Mode: mode, Expires: time.Now().Add(30 * time.Minute).Unix()}
 	data, _ := json.Marshal([]MobileTokenRecord{record})
 	if err := os.WriteFile(mobileTokenPath, data, 0600); err != nil {
 		t.Fatal(err)

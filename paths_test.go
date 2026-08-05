@@ -9,6 +9,106 @@ import (
 	"testing"
 )
 
+func TestPathHelpersVariants(t *testing.T) {
+	app := newTestAuthApp(t)
+	app.roots = map[string]string{"internal": t.TempDir(), "sd": t.TempDir()}
+
+	app.cfg.InternalEnabled = false
+	if _, _, err := app.resolvePath("internal/Books/a.txt", true); err == nil || !strings.Contains(err.Error(), "storage disabled") {
+		t.Fatalf("resolvePath disabled storage err=%v", err)
+	}
+	app.cfg.InternalEnabled = true
+
+	cases := []struct {
+		v     string
+		allow bool
+		want  string
+	}{
+		{"internal/Books/a.txt", true, "internal/Books/a.txt"},
+		{"", true, "internal"},
+		{"", false, ""},
+		{"internal", false, ""},
+		{"internal/Books", true, "internal/Books"},
+		{"sd/Books/x.txt", true, "sd/Books/x.txt"},
+		{"nope/x", true, ""},
+		{"internal/../../etc", true, ""},
+	}
+	for _, tc := range cases {
+		_, clean, err := app.resolvePath(tc.v, tc.allow)
+		if tc.want == "" {
+			if err == nil {
+				t.Fatalf("resolvePath(%q,%v) want err", tc.v, tc.allow)
+			}
+			continue
+		}
+		if err != nil || clean != tc.want {
+			t.Fatalf("resolvePath(%q,%v) = %q,%v want %q", tc.v, tc.allow, clean, err, tc.want)
+		}
+	}
+
+	if _, _, err := app.resolvePath("internal/system/x", true); err == nil || !strings.Contains(err.Error(), "protected") {
+		t.Fatalf("resolvePath protected err=%v", err)
+	}
+	app.roots["sd"] = filepath.Join(t.TempDir(), "missing")
+	if _, _, err := app.resolvePath("sd/Books/x.txt", true); err == nil || !strings.Contains(err.Error(), "memory card") {
+		t.Fatalf("resolvePath sd missing err=%v", err)
+	}
+
+	prot := []struct {
+		v    string
+		want bool
+	}{
+		{"internal", false},
+		{"internal/Books", false},
+		{"internal/system", true},
+		{"internal/system/x", true},
+		{"internal/wififiles.log", true},
+		{"sd/lost.dir", true},
+		{"sd/Books", false},
+		{"nope/x", false},
+	}
+	for _, tc := range prot {
+		if got := isProtectedVirtual(tc.v); got != tc.want {
+			t.Fatalf("isProtectedVirtual(%q) = %v, want %v", tc.v, got, tc.want)
+		}
+	}
+
+	hidden := []struct {
+		parent, name string
+		want         bool
+	}{
+		{"internal", "wififiles.log", true},
+		{"internal", "books", false},
+		{"sd", "lost.dir", true},
+		{"sd", "books", false},
+		{"unknown", "x", false},
+		{"internal/Books", "x", false},
+	}
+	for _, tc := range hidden {
+		if got := isHiddenSystemPath(tc.parent, tc.name); got != tc.want {
+			t.Fatalf("isHiddenSystemPath(%q,%q) = %v, want %v", tc.parent, tc.name, got, tc.want)
+		}
+	}
+
+	parents := []struct {
+		v    string
+		want string
+	}{
+		{"internal", ""},
+		{"sd", ""},
+		{"", ""},
+		{".", ""},
+		{"internal/Books", "internal"},
+		{"internal/Books/a.txt", "internal/Books"},
+		{"/internal/Books", "internal"},
+	}
+	for _, tc := range parents {
+		if got := parentVirtual(tc.v); got != tc.want {
+			t.Fatalf("parentVirtual(%q) = %q, want %q", tc.v, got, tc.want)
+		}
+	}
+}
+
 func TestEncodeAndRequestVirtualPath(t *testing.T) {
 	original := "internal/Books/книга.pdf"
 	enc := encodeVirtualPath(original)

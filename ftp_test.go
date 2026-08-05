@@ -515,6 +515,76 @@ func TestFTPListNonexistentFileAndHiddenEntries(t *testing.T) {
 	}
 }
 
+func TestFTPCwdAndListBranches(t *testing.T) {
+	app, port := ftpTestServer(t)
+	books := filepath.Join(app.roots["internal"], "Books")
+	if err := os.WriteFile(filepath.Join(books, "single.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := ftpConnect(t, port)
+	c.login(t)
+
+	if got := c.cmd("CWD /"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD /: %q", got)
+	}
+	if got := c.cmd("CWD internal/Books/single.txt"); !strings.HasPrefix(got, "550 ") {
+		t.Fatalf("CWD file: %q", got)
+	}
+	if got := c.cmd("CWD internal"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD internal: %q", got)
+	}
+	if got := c.cmd("CWD Books"); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("CWD Books: %q", got)
+	}
+
+	data := c.passive(t)
+	if got := c.cmd("NLST"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("NLST: %q", got)
+	}
+	listing := ftpDrain(t, data)
+	if !strings.Contains(listing, "single.txt") || strings.Contains(listing, "-rw-") {
+		t.Fatalf("NLST raw names expected:\n%s", listing)
+	}
+	if got := c.reply(); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("NLST done: %q", got)
+	}
+
+	data = c.passive(t)
+	if got := c.cmd("MLSD"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("MLSD: %q", got)
+	}
+	listing = ftpDrain(t, data)
+	if !strings.Contains(listing, "type=file") || !strings.Contains(listing, "single.txt") {
+		t.Fatalf("MLSD file entry expected:\n%s", listing)
+	}
+	if got := c.reply(); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("MLSD done: %q", got)
+	}
+}
+
+func TestFTPRootListSkipsMissingSdRoot(t *testing.T) {
+	app, port := ftpTestServer(t)
+	app.roots["sd"] = filepath.Join(t.TempDir(), "missing")
+
+	c := ftpConnect(t, port)
+	c.login(t)
+	data := c.passive(t)
+	if got := c.cmd("LIST"); !strings.HasPrefix(got, "150 ") {
+		t.Fatalf("LIST: %q", got)
+	}
+	listing := ftpDrain(t, data)
+	if strings.Contains(listing, "sd") {
+		t.Fatalf("root LIST should skip missing sd root:\n%s", listing)
+	}
+	if !strings.Contains(listing, "internal") {
+		t.Fatalf("root LIST should show internal:\n%s", listing)
+	}
+	if got := c.reply(); !strings.HasPrefix(got, "226 ") {
+		t.Fatalf("LIST done: %q", got)
+	}
+}
+
 func TestFTPResumeRetrieve(t *testing.T) {
 	app, port := ftpTestServer(t)
 	c := ftpConnect(t, port)

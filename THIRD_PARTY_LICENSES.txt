@@ -1,4 +1,4 @@
-WiFiFiles 0.7.29 includes a modified copy of:
+WiFiFiles 0.7.30 includes a modified copy of:
 
 Project: go-smb-server
 Copyright (c) 2026 Son Roy Almerol

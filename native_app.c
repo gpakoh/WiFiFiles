@@ -2,7 +2,7 @@
  * Freestanding ARM EABI build: only depends on libinkview.so from firmware.
  */
 
-#define WF_VERSION "0.7.29"
+#define WF_VERSION "0.7.30"
 
 typedef unsigned int uint32_t;
 typedef unsigned long size_t;

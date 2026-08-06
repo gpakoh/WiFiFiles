@@ -356,7 +356,9 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// extractAppFromZip writes the app/WiFiFiles.app entry of the release zip to dst.
+// extractAppFromZip writes the WiFiFiles.app entry of the release zip to dst.
+// Since 0.7.31 the release zip contains applications/WiFiFiles.app (the app
+// folder layout), older archives used app/WiFiFiles.app — both are accepted.
 func extractAppFromZip(zipPath, dst string) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -365,13 +367,13 @@ func extractAppFromZip(zipPath, dst string) error {
 	defer zr.Close()
 	var entry *zip.File
 	for _, f := range zr.File {
-		if f.Name == "app/WiFiFiles.app" {
+		if f.Name == "applications/WiFiFiles.app" || f.Name == "app/WiFiFiles.app" {
 			entry = f
 			break
 		}
 	}
 	if entry == nil {
-		return errors.New("app/WiFiFiles.app missing from archive")
+		return errors.New("WiFiFiles.app missing from archive")
 	}
 	rc, err := entry.Open()
 	if err != nil {

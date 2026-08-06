@@ -46,9 +46,14 @@ func writeFakeApp(t *testing.T, path string) {
 
 func makeReleaseZip(t *testing.T, appBytes []byte) []byte {
 	t.Helper()
+	return makeReleaseZipEntry(t, "applications/WiFiFiles.app", appBytes)
+}
+
+func makeReleaseZipEntry(t *testing.T, name string, appBytes []byte) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	f, err := zw.Create("app/WiFiFiles.app")
+	f, err := zw.Create(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,6 +355,23 @@ func TestExtractAppFromZip(t *testing.T) {
 	badDst := filepath.Join(dir, "no", "such", "dir", "out.app")
 	if err := extractAppFromZip(zipPath, badDst); err == nil {
 		t.Error("unwritable destination should fail")
+	}
+}
+
+func TestExtractAppFromZipLegacyLayout(t *testing.T) {
+	dir := t.TempDir()
+	app := fakeAppBytes(t, true)
+	zipPath := filepath.Join(dir, "legacy.zip")
+	if err := os.WriteFile(zipPath, makeReleaseZipEntry(t, "app/WiFiFiles.app", app), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out.app")
+	if err := extractAppFromZip(zipPath, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if !bytes.Equal(got, app) {
+		t.Error("extracted app mismatch")
 	}
 }
 

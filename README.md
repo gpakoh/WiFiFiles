@@ -4,7 +4,7 @@
 
 Проект разработан и протестирован на **PocketBook 650** с прошивкой **W650.5.14.798**.
 
-> Текущая версия: **0.7.28** — [скачать с GitHub Releases](https://github.com/gpakoh/WiFiFiles/releases/latest)
+> Текущая версия: **0.7.29** — [скачать с GitHub Releases](https://github.com/gpakoh/WiFiFiles/releases/latest)
 
 Интерфейс приложения доступен на **4 языках**: русском, английском, немецком и французском.
 

@@ -79,7 +79,7 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 			}
 			written += int64(n)
 			if written >= nextCheck {
-				if err := ensureFreeSpaceDuringWrite(dir, written); err != nil {
+				if err := ensureFreeSpaceDuringWrite(dir); err != nil {
 					return "", written, err
 				}
 				nextCheck = written + spaceCheckInterval
@@ -92,7 +92,7 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 			return "", written, rerr
 		}
 	}
-	if err := ensureFreeSpaceDuringWrite(dir, written); err != nil {
+	if err := ensureFreeSpaceDuringWrite(dir); err != nil {
 		return "", written, err
 	}
 	if err := tmp.Sync(); err != nil {
@@ -105,13 +105,16 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	return tmpPath, written, nil
 }
 
-func ensureFreeSpaceDuringWrite(dir string, written int64) error {
+// ensureFreeSpaceDuringWrite aborts the upload when less than the safety
+// reserve is left. diskSpaceAvailable already reflects the bytes written so
+// far, so only the remaining free space must be compared with the reserve.
+func ensureFreeSpaceDuringWrite(dir string) error {
 	free, err := diskSpaceAvailable(dir)
 	if err != nil {
 		return fmt.Errorf("failed to check disk space: %w", err)
 	}
-	if uint64(written)+uploadSafetyReserve > free {
-		return fmt.Errorf("insufficient disk space: need ~%s, available %s", humanSize(written), humanSize(int64(free)))
+	if free < uploadSafetyReserve {
+		return fmt.Errorf("insufficient disk space: only ~%s free, need to keep %s reserved", humanSize(int64(free)), humanSize(int64(uploadSafetyReserve)))
 	}
 	return nil
 }

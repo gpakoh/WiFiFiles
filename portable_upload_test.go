@@ -364,7 +364,7 @@ func TestWriteStreamTempSpaceCheckError(t *testing.T) {
 
 func TestWriteStreamTempAbortsWhenDiskFull(t *testing.T) {
 	old := diskSpaceAvailable
-	diskSpaceAvailable = func(string) (uint64, error) { return uploadSafetyReserve, nil }
+	diskSpaceAvailable = func(string) (uint64, error) { return 0, nil }
 	defer func() { diskSpaceAvailable = old }()
 	dir := t.TempDir()
 	_, written, err := writeStreamTemp(dir, strings.NewReader(strings.Repeat("a", 10<<20)))
@@ -379,5 +379,20 @@ func TestWriteStreamTempAbortsWhenDiskFull(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Fatalf("temp file left behind: %v", entries)
+	}
+}
+
+func TestWriteStreamTempContinuesWhenReserveFree(t *testing.T) {
+	old := diskSpaceAvailable
+	diskSpaceAvailable = func(string) (uint64, error) { return 10 << 20, nil }
+	defer func() { diskSpaceAvailable = old }()
+	dir := t.TempDir()
+	tmp, written, err := writeStreamTemp(dir, strings.NewReader(strings.Repeat("a", 100<<20)))
+	if err != nil {
+		t.Fatalf("upload with 10 MiB free and 100 MiB written aborted: %v", err)
+	}
+	defer os.Remove(tmp)
+	if written != 100<<20 {
+		t.Fatalf("written = %d, want 100 MiB", written)
 	}
 }

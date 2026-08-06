@@ -204,11 +204,7 @@ func (d *DAVServer) digestAuthenticated(r *http.Request) bool {
 }
 
 func (d *DAVServer) authenticated(r *http.Request) bool {
-	if d.digestAuthenticated(r) {
-		return true
-	}
-	username, password, ok := r.BasicAuth()
-	return ok && d.app.checkCredentials(username, password)
+	return d.digestAuthenticated(r)
 }
 
 func isWindowsWebDAV(r *http.Request) bool {

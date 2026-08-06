@@ -266,18 +266,22 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seen := make(map[string]struct{}, len(pending))
+	uploadCommitMu.Lock()
 	if !overwrite {
 		for _, item := range pending {
 			key := strings.ToLower(item.name)
 			if _, exists := seen[key]; exists {
+				uploadCommitMu.Unlock()
 				redirectMsg(w, r, targetVirtual, "Один файл выбран несколько раз: "+item.name)
 				return
 			}
 			seen[key] = struct{}{}
 			if _, statErr := os.Stat(filepath.Join(target, item.name)); statErr == nil {
+				uploadCommitMu.Unlock()
 				redirectMsg(w, r, targetVirtual, "Файл уже существует: "+item.name+". Для замены отметьте соответствующий пункт.")
 				return
 			} else if !errors.Is(statErr, os.ErrNotExist) {
+				uploadCommitMu.Unlock()
 				http.Error(w, "upload error: "+statErr.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -288,12 +292,14 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		item := &pending[i]
 		finalPath := filepath.Join(target, item.name)
 		if err := os.Rename(item.tmpPath, finalPath); err != nil {
+			uploadCommitMu.Unlock()
 			http.Error(w, "upload error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		item.tmpPath = ""
 		a.scheduleLibraryRefresh(finalPath)
 	}
+	uploadCommitMu.Unlock()
 	redirectMsg(w, r, targetVirtual, "Загрузка завершена")
 }
 
@@ -310,7 +316,14 @@ func saveUpload(dir string, hdr *multipart.FileHeader, overwrite bool) error {
 	if err != nil {
 		return err
 	}
+	tmpPath, err := writeMultipartTemp(dir, hdr)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
 	finalPath := filepath.Join(dir, name)
+	uploadCommitMu.Lock()
+	defer uploadCommitMu.Unlock()
 	if !overwrite {
 		if _, statErr := os.Stat(finalPath); statErr == nil {
 			return os.ErrExist
@@ -318,13 +331,5 @@ func saveUpload(dir string, hdr *multipart.FileHeader, overwrite bool) error {
 			return statErr
 		}
 	}
-	tmpPath, err := writeMultipartTemp(dir, hdr)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpPath)
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return err
-	}
-	return nil
+	return os.Rename(tmpPath, finalPath)
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -47,13 +46,61 @@ func newTestDAV(t *testing.T) (*DAVServer, string) {
 func davRequest(t *testing.T, handler http.Handler, method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("pocketbook:650wifi")))
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if _, explicit := headers["Authorization"]; !explicit {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code == http.StatusUnauthorized {
+			return davRequestWithDigest(t, handler, method, target, body, headers, rr.Header().Get("WWW-Authenticate"))
+		}
+		return rr
 	}
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	return rr
+}
+
+func davRequestWithDigest(t *testing.T, handler http.Handler, method, target, body string, headers map[string]string, challenge string) *httptest.ResponseRecorder {
+	t.Helper()
+	values := parseDigestHeader(challenge)
+	nonce := values["nonce"]
+	if nonce == "" {
+		t.Fatalf("missing nonce in challenge: %q", challenge)
+	}
+	uri := values["uri"]
+	if uri == "" {
+		uri = httptest.NewRequest(method, target, nil).URL.RequestURI()
+	}
+	ha1 := digestHA1("pocketbook", "650wifi")
+	ha2 := md5Hex(method + ":" + uri)
+	nc, cnonce := "00000001", "abcdef"
+	response := md5Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":auth:" + ha2)
+	auth := fmt.Sprintf(`Digest username="pocketbook", realm="WiFiFiles", nonce="%s", uri="%s", algorithm=MD5, response="%s", qop=auth, nc=%s, cnonce="%s"`,
+		nonce, uri, response, nc, cnonce)
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Authorization", auth)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestDAVRejectsBasicAuth(t *testing.T) {
+	dav, _ := newTestDAV(t)
+	req := httptest.NewRequest("PROPFIND", "http://pb/dav/internal/", nil)
+	req.SetBasicAuth("pocketbook", "650wifi")
+	rr := httptest.NewRecorder()
+	dav.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("Basic auth accepted: %d %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rr.Header().Get("WWW-Authenticate")), "basic") {
+		t.Fatalf("Basic advertised in challenge: %q", rr.Header().Get("WWW-Authenticate"))
+	}
 }
 
 func TestWebDAVFileLifecycle(t *testing.T) {
@@ -1144,8 +1191,21 @@ func TestHandlePutMoreBranches(t *testing.T) {
 		t.Fatalf("new file content: %q %v", data, err)
 	}
 
+	challengeRR := httptest.NewRecorder()
+	dav.ServeHTTP(challengeRR, httptest.NewRequest(http.MethodPut, "http://pb/dav/internal/fail.txt", nil))
+	challenge := challengeRR.Header().Get("WWW-Authenticate")
+	values := parseDigestHeader(challenge)
+	nonce := values["nonce"]
+	uri := values["uri"]
+	if uri == "" {
+		uri = "/dav/internal/fail.txt"
+	}
+	ha1 := digestHA1("pocketbook", "650wifi")
+	ha2 := md5Hex(http.MethodPut + ":" + uri)
+	nc, cnonce := "00000001", "abcdef"
+	response := md5Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":auth:" + ha2)
 	req := httptest.NewRequest(http.MethodPut, "http://pb/dav/internal/fail.txt", failingReadCloser{})
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("pocketbook:650wifi")))
+	req.Header.Set("Authorization", fmt.Sprintf(`Digest username="pocketbook", realm="WiFiFiles", nonce="%s", uri="%s", algorithm=MD5, response="%s", qop=auth, nc=%s, cnonce="%s"`, nonce, uri, response, nc, cnonce))
 	rr = httptest.NewRecorder()
 	dav.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {

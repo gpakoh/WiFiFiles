@@ -8,10 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 const uploadSafetyReserve = uint64(4 << 20)
+
+// diskSpaceAvailable is a seam for tests that need to simulate a full disk.
+var diskSpaceAvailable = availableBytes
 
 func availableBytes(path string) (uint64, error) {
 	var st syscall.Statfs_t
@@ -47,6 +51,8 @@ func ensureRequestUploadSpace(dir string, contentLength int64) error {
 // writeStreamTemp writes an incoming upload directly into the selected reader
 // folder. It deliberately avoids ParseMultipartForm/FileHeader.Open because Go's
 // multipart parser spills large parts into the tiny PocketBook /tmp filesystem.
+// Free space is re-checked while writing so that chunked uploads (unknown
+// Content-Length) cannot fill the storage.
 func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	tmp, err := os.CreateTemp(dir, ".wififiles-upload-*.part")
 	if err != nil {
@@ -62,8 +68,31 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	}()
 	chmodBestEffort(tmpPath, 0644)
 	buf := make([]byte, 64<<10)
-	written, err := io.CopyBuffer(tmp, src, buf)
-	if err != nil {
+	var written int64
+	const spaceCheckInterval = 4 << 20
+	nextCheck := int64(spaceCheckInterval)
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := tmp.Write(buf[:n]); werr != nil {
+				return "", written, werr
+			}
+			written += int64(n)
+			if written >= nextCheck {
+				if err := ensureFreeSpaceDuringWrite(dir, written); err != nil {
+					return "", written, err
+				}
+				nextCheck = written + spaceCheckInterval
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return "", written, rerr
+		}
+	}
+	if err := ensureFreeSpaceDuringWrite(dir, written); err != nil {
 		return "", written, err
 	}
 	if err := tmp.Sync(); err != nil {
@@ -76,6 +105,17 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	return tmpPath, written, nil
 }
 
+func ensureFreeSpaceDuringWrite(dir string, written int64) error {
+	free, err := diskSpaceAvailable(dir)
+	if err != nil {
+		return fmt.Errorf("failed to check disk space: %w", err)
+	}
+	if uint64(written)+uploadSafetyReserve > free {
+		return fmt.Errorf("insufficient disk space: need ~%s, available %s", humanSize(written), humanSize(int64(free)))
+	}
+	return nil
+}
+
 func writeMultipartTemp(dir string, hdr *multipart.FileHeader) (string, error) {
 	src, err := hdr.Open()
 	if err != nil {
@@ -86,7 +126,14 @@ func writeMultipartTemp(dir string, hdr *multipart.FileHeader) (string, error) {
 	return tmpPath, err
 }
 
+// uploadCommitMu serializes the check-then-rename commit of uploads so that
+// two concurrent uploads of the same name cannot both see a free path and then
+// clobber each other (TOCTOU race).
+var uploadCommitMu sync.Mutex
+
 func commitTempAutoRename(dir, name, tmpPath string) (string, error) {
+	uploadCommitMu.Lock()
+	defer uploadCommitMu.Unlock()
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
 	for i := 0; i < 10000; i++ {

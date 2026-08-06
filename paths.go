@@ -46,7 +46,39 @@ func (a *App) resolvePath(virtual string, allowRoot bool) (string, string, error
 	if isProtectedVirtual(clean) {
 		return "", "", errors.New("system path is protected")
 	}
+	if err := rejectSymlinkWalk(root, full); err != nil {
+		return "", "", err
+	}
 	return full, clean, nil
+}
+
+// rejectSymlinkWalk rejects paths whose existing prefix crosses a symbolic
+// link below the volume root. Missing components are tolerated (resolvePath
+// stays lexical for paths that do not exist yet); WebDAV applies its own
+// stricter missing-parent checks on top.
+func rejectSymlinkWalk(root, full string) error {
+	rel, err := filepath.Rel(root, full)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		st, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return errors.New("symbolic links are not available")
+		}
+	}
+	return nil
 }
 
 var protectedRootNames = map[string]map[string]struct{}{

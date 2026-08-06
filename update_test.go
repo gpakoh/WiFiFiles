@@ -584,6 +584,76 @@ func TestUpdateInstallVariants(t *testing.T) {
 	}
 }
 
+func TestUpdateInstallShaAssetMissing(t *testing.T) {
+	saveGlobals(t)
+	appDir := t.TempDir()
+	apps := t.TempDir()
+	updateAppsDirVar = apps
+	writeFakeApp(t, filepath.Join(apps, "WiFiFiles.app"))
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":"WiFiFiles_9.9.9.zip","browser_download_url":%q}]}`,
+			srv.URL+"/WiFiFiles_9.9.9.zip")
+	}))
+	defer srv.Close()
+	updateAPIBaseURL = srv.URL
+
+	if err := updateInstall(appDir); err == nil {
+		t.Fatal("missing sha256 asset should fail closed")
+	}
+	data, _ := os.ReadFile(updateStatusVar)
+	if !strings.Contains(string(data), "status=error") {
+		t.Errorf("error state wrong: %s", data)
+	}
+}
+
+func TestUpdateInstallShaDownloadError(t *testing.T) {
+	saveGlobals(t)
+	appDir := t.TempDir()
+	apps := t.TempDir()
+	updateAppsDirVar = apps
+	writeFakeApp(t, filepath.Join(apps, "WiFiFiles.app"))
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/gpakoh/WiFiFiles/releases/latest":
+			fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[{"name":"WiFiFiles_9.9.9.zip","browser_download_url":%q},{"name":"WiFiFiles_9.9.9.sha256","browser_download_url":%q}]}`,
+				srv.URL+"/WiFiFiles_9.9.9.zip", srv.URL+"/WiFiFiles_9.9.9.sha256")
+		case "/WiFiFiles_9.9.9.zip":
+			w.Write(makeReleaseZip(t, fakeAppBytes(t, true)))
+		case "/WiFiFiles_9.9.9.sha256":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	updateAPIBaseURL = srv.URL
+
+	if err := updateInstall(appDir); err == nil {
+		t.Fatal("sha256 download failure should fail closed")
+	}
+}
+
+func TestUpdateInstallShaParseError(t *testing.T) {
+	saveGlobals(t)
+	appDir := t.TempDir()
+	apps := t.TempDir()
+	updateAppsDirVar = apps
+	writeFakeApp(t, filepath.Join(apps, "WiFiFiles.app"))
+
+	zipBytes := makeReleaseZip(t, fakeAppBytes(t, true))
+	srv := setupUpdateServer(t, zipBytes, "not-a-sha256-line\n")
+	defer srv.Close()
+	updateAPIBaseURL = srv.URL
+
+	if err := updateInstall(appDir); err == nil {
+		t.Fatal("invalid sha256 format should fail closed")
+	}
+}
+
 func TestUpdateInstallCorruptZip(t *testing.T) {
 	saveGlobals(t)
 	appDir := t.TempDir()
@@ -591,7 +661,8 @@ func TestUpdateInstallCorruptZip(t *testing.T) {
 	updateAppsDirVar = apps
 	writeFakeApp(t, filepath.Join(apps, "WiFiFiles.app"))
 	zipBytes := []byte("definitely not a zip")
-	srv := setupUpdateServer(t, zipBytes, "")
+	h := sha256.Sum256(zipBytes)
+	srv := setupUpdateServer(t, zipBytes, hex.EncodeToString(h[:])+"  WiFiFiles_9.9.9.zip\n")
 	defer srv.Close()
 	updateAPIBaseURL = srv.URL
 	if err := updateInstall(appDir); err == nil {

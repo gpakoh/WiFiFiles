@@ -169,21 +169,35 @@ func updateInstall(appDir string) error {
 		return err
 	}
 	defer os.Remove(zipPath)
-	if shaURL := findAssetURL(rel, "WiFiFiles_"+tag+".sha256"); shaURL != "" {
-		shaPath := filepath.Join(appDir, "update.zip.sha256")
-		if err := downloadToFile(shaURL, shaPath, 4096); err == nil {
-			sum, err := sha256File(zipPath)
-			if err == nil {
-				data, _ := os.ReadFile(shaPath)
-				expected, _ := parseSHA256(data)
-				if expected != "" && !strings.EqualFold(expected, sum) {
-					os.Remove(shaPath)
-					writeUpdateStatus(appDir, "error", version, tag, "Контрольная сумма не совпадает")
-					return errors.New("sha256 mismatch")
-				}
-			}
-		}
-		os.Remove(shaPath)
+	shaURL := findAssetURL(rel, "WiFiFiles_"+tag+".sha256")
+	if shaURL == "" {
+		writeUpdateStatus(appDir, "error", version, tag, "В релизе не найден файл контрольной суммы")
+		return errors.New("sha256 asset not found")
+	}
+	shaPath := filepath.Join(appDir, "update.zip.sha256")
+	defer os.Remove(shaPath)
+	if err := downloadToFile(shaURL, shaPath, 4096); err != nil {
+		writeUpdateStatus(appDir, "error", version, tag, "Ошибка загрузки контрольной суммы: "+err.Error())
+		return err
+	}
+	data, err := os.ReadFile(shaPath)
+	if err != nil {
+		writeUpdateStatus(appDir, "error", version, tag, "Не удалось прочитать контрольную сумму: "+err.Error())
+		return err
+	}
+	expected, err := parseSHA256(data)
+	if err != nil {
+		writeUpdateStatus(appDir, "error", version, tag, "Неверный формат контрольной суммы")
+		return err
+	}
+	sum, err := sha256File(zipPath)
+	if err != nil {
+		writeUpdateStatus(appDir, "error", version, tag, "Не удалось вычислить контрольную сумму: "+err.Error())
+		return err
+	}
+	if !strings.EqualFold(expected, sum) {
+		writeUpdateStatus(appDir, "error", version, tag, "Контрольная сумма не совпадает")
+		return errors.New("sha256 mismatch")
 	}
 	newApp := filepath.Join(appDir, "update.app")
 	if err := extractAppFromZip(zipPath, newApp); err != nil {

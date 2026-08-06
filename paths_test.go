@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -245,6 +246,77 @@ func TestCommitTempAutoRenameRenameError(t *testing.T) {
 	src := filepath.Join(dir, "missing-src.part")
 	if _, err := commitTempAutoRename(dir, "book.fb2", src); err == nil {
 		t.Fatal("Rename of missing temp should fail")
+	}
+}
+
+func TestResolvePathRejectsSymlink(t *testing.T) {
+	app := newTestAuthApp(t)
+	root := t.TempDir()
+	app.roots = map[string]string{"internal": root}
+	app.cfg.InternalEnabled = true
+	if err := os.MkdirAll(filepath.Join(root, "Books"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "Books", "escape")); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	if _, _, err := app.resolvePath("internal/Books/escape/etc/passwd", true); err == nil {
+		t.Fatal("symlink escape accepted")
+	}
+	if _, _, err := app.resolvePath("internal/Books/escape", true); err == nil {
+		t.Fatal("symlink itself accepted")
+	}
+	if _, _, err := app.resolvePath("internal/Books/new.txt", true); err != nil {
+		t.Fatalf("missing leaf must stay allowed: %v", err)
+	}
+}
+
+func TestCommitTempAutoRenameConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	const n = 8
+	results := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		tm := filepath.Join(dir, fmt.Sprintf(".src-%d", i))
+		if err := os.WriteFile(tm, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func(tmp string) {
+			defer wg.Done()
+			name, err := commitTempAutoRename(dir, "book.txt", tmp)
+			if err != nil {
+				results <- "ERR: " + err.Error()
+				return
+			}
+			results <- name
+		}(tm)
+	}
+	wg.Wait()
+	close(results)
+	seen := make(map[string]bool)
+	for r := range results {
+		if strings.HasPrefix(r, "ERR: ") {
+			t.Fatal(r)
+		}
+		if seen[r] {
+			t.Fatalf("duplicate result %q — a file was clobbered", r)
+		}
+		seen[r] = true
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := 0
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), "book") {
+			got++
+		}
+	}
+	if got != n {
+		t.Fatalf("committed files = %d, want %d", got, n)
 	}
 }
 

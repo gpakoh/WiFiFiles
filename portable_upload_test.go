@@ -350,3 +350,34 @@ func TestWriteMultipartTempOpenError(t *testing.T) {
 		t.Fatal("open without parsed tmpfile accepted")
 	}
 }
+
+func TestWriteStreamTempSpaceCheckError(t *testing.T) {
+	old := diskSpaceAvailable
+	diskSpaceAvailable = func(string) (uint64, error) { return 0, errors.New("statfs failed") }
+	defer func() { diskSpaceAvailable = old }()
+	dir := t.TempDir()
+	_, _, err := writeStreamTemp(dir, strings.NewReader(strings.Repeat("a", 10<<20)))
+	if err == nil || !strings.Contains(err.Error(), "failed to check disk space") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWriteStreamTempAbortsWhenDiskFull(t *testing.T) {
+	old := diskSpaceAvailable
+	diskSpaceAvailable = func(string) (uint64, error) { return uploadSafetyReserve, nil }
+	defer func() { diskSpaceAvailable = old }()
+	dir := t.TempDir()
+	_, written, err := writeStreamTemp(dir, strings.NewReader(strings.Repeat("a", 10<<20)))
+	if err == nil {
+		t.Fatal("upload past free space accepted")
+	}
+	if !strings.Contains(err.Error(), "insufficient disk space") {
+		t.Fatalf("err = %v", err)
+	}
+	if written == 0 {
+		t.Fatal("expected partial write progress")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("temp file left behind: %v", entries)
+	}
+}

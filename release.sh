@@ -8,7 +8,7 @@ VERSION="$(sed -n 's/^const version = "\([^"]*\)"/\1/p' "$ROOT/server.go" | head
 [ -n "$VERSION" ] || { echo "version not found in server.go" >&2; exit 1; }
 ZIP="$OUT/WiFiFiles_$VERSION.zip"
 rm -f "$ZIP"
-(cd "$OUT" && mkdir -p zip/app && cp -f WiFiFiles.app zip/app/WiFiFiles.app && cd zip && zip -qr "$ZIP" app && cd .. && rm -rf zip)
+(cd "$OUT" && mkdir -p zip/applications && cp -f WiFiFiles.app zip/applications/WiFiFiles.app && cd zip && zip -qr "$ZIP" applications && cd .. && rm -rf zip)
 SHA256SUM="${SHA256SUM:-sha256sum}"
 "$SHA256SUM" "$ZIP" > "$OUT/WiFiFiles_$VERSION.sha256"
 echo "created $ZIP"

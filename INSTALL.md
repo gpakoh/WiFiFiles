@@ -1,4 +1,4 @@
-# Установка WiFiFiles 0.7.30 на PocketBook 650
+# Установка WiFiFiles 0.7.31 на PocketBook 650
 
 1. Подключите PocketBook к компьютеру по USB.
 2. Откройте внутреннюю память ридера.

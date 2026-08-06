@@ -147,6 +147,19 @@ func TestMobilePageOmitsDefaultBadgeForOtherTargets(t *testing.T) {
 	}
 }
 
+func TestMobilePageDoesNotFilterFilesViaAcceptAttribute(t *testing.T) {
+	app, token, _ := prepareMobileTest(t, "safe")
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/m/"+token, nil))
+	body := rr.Body.String()
+	if strings.Contains(body, `type="file" multiple accept=`) {
+		t.Fatalf("accept attribute still present — iOS Safari disables non-UTI files (e.g. fb2):\n%s", body)
+	}
+	if !strings.Contains(body, "bookExt") || !strings.Contains(body, "rejected-box") {
+		t.Fatal("client-side book extension filter missing")
+	}
+}
+
 func TestSafeModeListsFilesButDoesNotExposeEditActions(t *testing.T) {
 	app, token, books := prepareMobileTest(t, "safe")
 	if err := os.WriteFile(filepath.Join(books, "existing.epub"), []byte("book"), 0644); err != nil {

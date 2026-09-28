@@ -29,6 +29,13 @@ jobs:
       - name: Vet
         run: go vet $(ls *.go | grep -v _test)
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Upload UI cancellation and retry
+        run: node --test tests/upload-ui.test.cjs
+
       - name: Cross-compile ARM
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath -o /dev/null $(ls *.go | grep -v _test)
 

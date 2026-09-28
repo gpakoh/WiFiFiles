@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -689,6 +690,8 @@ func (d *DAVServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parent := filepath.Dir(full)
+	w, transfer := beginHTTPUpload(w, r, fmt.Sprintf("WebDAV PUT %q", canonical))
+	defer transfer.finish()
 	if st, err := os.Stat(parent); err != nil || !st.IsDir() {
 		http.Error(w, "Родительская папка не существует", http.StatusConflict)
 		return
@@ -712,36 +715,35 @@ func (d *DAVServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Файл с таким именем уже существует", http.StatusPreconditionFailed)
 		return
 	}
-	tmp, err := os.CreateTemp(parent, ".wififiles-dav-upload-")
+	tmpName, _, err := writeStreamTempProgress(parent, r.Body, transfer.stage)
 	if err != nil {
+		transfer.failure = err
 		davHTTPError(w, err)
 		return
 	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		_ = tmp.Close()
-		if !ok {
-			_ = os.Remove(tmpName)
+	defer os.Remove(tmpName)
+	transfer.stage("commit")
+	err = func() error {
+		uploadCommitMu.Lock()
+		defer uploadCommitMu.Unlock()
+		if err := r.Context().Err(); err != nil {
+			return err
 		}
+		st, statErr := os.Stat(full)
+		existed = statErr == nil
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if existed && (st.IsDir() || strings.TrimSpace(r.Header.Get("If-None-Match")) == "*") {
+			return os.ErrExist
+		}
+		return os.Rename(tmpName, full)
 	}()
-	if _, err = io.Copy(tmp, r.Body); err == nil {
-		err = tmp.Sync()
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		// FAT does not implement Unix permissions and returns EPERM here.
-		// The file is already safely written and synced, so chmod is optional.
-		chmodBestEffort(tmpName, 0644)
-		err = os.Rename(tmpName, full)
-	}
 	if err != nil {
+		transfer.failure = err
 		davHTTPError(w, err)
 		return
 	}
-	ok = true
 	d.app.scheduleLibraryRefresh(full)
 	appendLog(runtimeDirPath, "WebDAV PUT "+canonical)
 	activity.addUpload()
@@ -1273,7 +1275,12 @@ func (d *DAVServer) handleUnlock(w http.ResponseWriter, r *http.Request) {
 
 func davHTTPError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	var netErr net.Error
 	switch {
+	case errors.As(err, &netErr) && netErr.Timeout():
+		status = http.StatusRequestTimeout
+	case errors.Is(err, syscall.ENOSPC), strings.Contains(err.Error(), "insufficient disk space"):
+		status = http.StatusInsufficientStorage
 	case os.IsNotExist(err):
 		status = http.StatusNotFound
 	case os.IsExist(err):

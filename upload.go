@@ -12,13 +12,111 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	maxMobileTokens        = 8
 	maxMobileFilesPerToken = 100
+	uploadIdleTimeout      = 2 * time.Minute
 )
+
+var uploadSequence uint32
+
+// Use ordinary socket deadlines supported by Go 1.23 / PocketBook Linux 3.0.35.
+// Reset before each network read and clear afterwards: slow flash writes and
+// fsync must not consume the next network read's allowance.
+type uploadBody struct {
+	io.ReadCloser
+	request    *http.Request
+	controller *http.ResponseController
+	idle       time.Duration
+	progress   *uploadProgress
+}
+
+func (b *uploadBody) Read(p []byte) (int, error) {
+	if err := b.request.Context().Err(); err != nil {
+		return 0, err
+	}
+	if err := b.controller.SetReadDeadline(time.Now().Add(b.idle)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return 0, err
+	}
+	n, err := b.ReadCloser.Read(p)
+	// Keep an expired deadline on errors: net/http may otherwise block while
+	// draining the unfinished body before writing the error response.
+	if err == nil || err == io.EOF {
+		_ = b.controller.SetReadDeadline(time.Time{})
+	}
+	if b.progress != nil {
+		b.progress.received += int64(n)
+		if time.Since(b.progress.lastLog) >= 15*time.Second {
+			b.progress.stage("receiving")
+		}
+		if err != nil && err != io.EOF {
+			b.progress.failure = err
+		}
+	}
+	return n, err
+}
+
+type uploadProgress struct {
+	id                 uint32
+	label              string
+	expected, received int64
+	started, lastLog   time.Time
+	phase              string
+	failure            error
+	status             int
+	controller         *http.ResponseController
+}
+
+type uploadResponseWriter struct {
+	http.ResponseWriter
+	progress *uploadProgress
+}
+
+func (w *uploadResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *uploadResponseWriter) WriteHeader(status int) {
+	if status >= 200 && w.progress.status == 0 {
+		w.progress.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *uploadResponseWriter) Write(p []byte) (int, error) {
+	if w.progress.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func beginHTTPUpload(w http.ResponseWriter, r *http.Request, label string) (http.ResponseWriter, *uploadProgress) {
+	p := &uploadProgress{id: atomic.AddUint32(&uploadSequence, 1), label: label, expected: r.ContentLength, started: time.Now(), controller: http.NewResponseController(w)}
+	r.Body = &uploadBody{ReadCloser: r.Body, request: r, controller: p.controller, idle: uploadIdleTimeout, progress: p}
+	p.stage("receiving")
+	return &uploadResponseWriter{ResponseWriter: w, progress: p}, p
+}
+
+func (p *uploadProgress) stage(phase string) {
+	if p.phase == phase && time.Since(p.lastLog) < 15*time.Second {
+		return
+	}
+	p.phase, p.lastLog = phase, time.Now()
+	appendLog(runtimeDirPath, fmt.Sprintf("Upload #%d %s: stage=%s received=%d expected=%d elapsed=%s", p.id, p.label, phase, p.received, p.expected, time.Since(p.started).Round(time.Millisecond)))
+}
+
+func (p *uploadProgress) finish() {
+	if p.failure == nil {
+		_ = p.controller.SetReadDeadline(time.Time{})
+	}
+	status := p.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	appendLog(runtimeDirPath, fmt.Sprintf("Upload #%d %s: end stage=%s status=%d received=%d expected=%d elapsed=%s error=%v", p.id, p.label, p.phase, status, p.received, p.expected, time.Since(p.started).Round(time.Millisecond), p.failure))
+}
 
 func readMobileTokens() ([]MobileTokenRecord, error) {
 	data, err := os.ReadFile(mobileTokenPath)
@@ -162,6 +260,8 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w, transfer := beginHTTPUpload(w, r, "HTTP")
+	defer transfer.finish()
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<30)
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -238,9 +338,10 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "upload error: "+nameErr.Error(), http.StatusBadRequest)
 				return
 			}
-			tmpPath, _, writeErr := writeStreamTemp(target, part)
+			tmpPath, _, writeErr := writeStreamTempProgress(target, part, transfer.stage)
 			_ = part.Close()
 			if writeErr != nil {
+				transfer.failure = writeErr
 				http.Error(w, "upload error: "+writeErr.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -265,6 +366,12 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	transfer.stage("commit")
+	if err := r.Context().Err(); err != nil {
+		transfer.failure = err
+		http.Error(w, err.Error(), http.StatusRequestTimeout)
+		return
+	}
 	seen := make(map[string]struct{}, len(pending))
 	uploadCommitMu.Lock()
 	if !overwrite {

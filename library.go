@@ -108,22 +108,48 @@ func (a *App) scheduleLibraryRefresh(filePath string) {
 
 func (a *App) flushLibraryRefresh() {
 	a.libraryMu.Lock()
+	if a.libraryRunning {
+		// Leave pending targets for the running worker to collect on exit.
+		a.libraryMu.Unlock()
+		return
+	}
 	targets := make([]string, 0, len(a.libraryTargets))
 	for target := range a.libraryTargets {
 		targets = append(targets, target)
 	}
 	a.libraryTargets = make(map[string]struct{})
 	a.libraryTimer = nil
+	a.libraryRunning = len(targets) > 0
 	a.libraryMu.Unlock()
 
 	targets = collapseLibraryTargets(targets)
 	if len(targets) == 0 {
 		return
 	}
-	a.runPocketBookScanner(targets)
+	a.startPocketBookScanner(targets, func() {
+		a.libraryMu.Lock()
+		a.libraryRunning = false
+		if len(a.libraryTargets) > 0 {
+			if a.libraryTimer != nil {
+				a.libraryTimer.Stop()
+			}
+			a.libraryTimer = time.AfterFunc(2500*time.Millisecond, a.flushLibraryRefresh)
+		}
+		a.libraryMu.Unlock()
+	})
 }
 
 func (a *App) runPocketBookScanner(targets []string) {
+	a.startPocketBookScanner(targets, nil)
+}
+
+func (a *App) startPocketBookScanner(targets []string, finished func()) {
+	started := false
+	defer func() {
+		if !started && finished != nil {
+			finished()
+		}
+	}()
 	scanner := findPocketBookExecutable(
 		"/mnt/ext1/system/bin/scanner.app",
 		"/ebrmain/bin/scanner.app",
@@ -150,7 +176,11 @@ func (a *App) runPocketBookScanner(targets []string) {
 	}
 	appendLog(runtimeDirPath, "Library refresh started for: "+strings.Join(targets, ", "))
 
+	started = true
 	go func() {
+		if finished != nil {
+			defer finished()
+		}
 		defer os.Remove(logPath)
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()

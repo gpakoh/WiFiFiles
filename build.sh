@@ -1,5 +1,12 @@
 #!/bin/sh
 set -eu
+# PocketBook 650 runs Linux 3.0.35. Go 1.24+ requires Linux >= 3.2.
+# Do not let the module toolchain download silently select a newer compiler.
+export GOTOOLCHAIN=local
+case "$(go env GOVERSION)" in
+    go1.23|go1.23.*) ;;
+    *) echo 'WiFiFiles requires Go 1.23.x (CI: 1.23.12) for PocketBook Linux 3.0.35.' >&2; exit 1 ;;
+esac
 OUT="${1:-build}"
 mkdir -p "$OUT"
 CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -trimpath -ldflags='-s -w' -o "$OUT/WiFiFiles.server" server.go mobile.go webdav.go webdav_ui.go qr.go ftp.go smb.go filenames.go library.go auth.go logging.go paths.go upload.go update.go activity.go

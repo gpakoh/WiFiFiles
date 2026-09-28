@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -54,6 +55,18 @@ func writeDiagnostic(appDir string) {
 	fmt.Fprintf(&b, "WiFiFiles diagnostic %s\n", version)
 	fmt.Fprintf(&b, "time=%s\n", time.Now().Format(time.RFC3339))
 	fmt.Fprintf(&b, "goos=%s goarch=%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(&b, "go_version=%s\n", runtime.Version())
+	var uts syscall.Utsname
+	if err := syscall.Uname(&uts); err == nil {
+		var release []byte
+		for _, c := range uts.Release {
+			if c == 0 {
+				break
+			}
+			release = append(release, byte(c))
+		}
+		fmt.Fprintf(&b, "kernel=%s\n", release)
+	}
 	fmt.Fprintf(&b, "uid=%d euid=%d gid=%d pid=%d\n", os.Getuid(), os.Geteuid(), os.Getgid(), os.Getpid())
 	fmt.Fprintf(&b, "executable=%s\n", os.Args[0])
 	fmt.Fprintf(&b, "runtime=%s\n", appDir)

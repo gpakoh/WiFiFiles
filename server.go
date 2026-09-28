@@ -92,6 +92,7 @@ type App struct {
 	libraryMu      sync.Mutex
 	libraryTimer   *time.Timer
 	libraryTargets map[string]struct{}
+	libraryRunning bool
 
 	mobileMu       sync.Mutex
 	mobilePending  map[string]map[string]struct{}
@@ -613,7 +614,12 @@ func (sm *ServiceManager) stopHTTPLocked() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = sm.httpSrv.Shutdown(ctx)
+	if err := sm.httpSrv.Shutdown(ctx); err != nil {
+		appendLog(sm.appDir, "HTTP shutdown: "+err.Error()+"; closing active connections")
+		if closeErr := sm.httpSrv.Close(); closeErr != nil {
+			appendLog(sm.appDir, "HTTP close: "+closeErr.Error())
+		}
+	}
 	cancel()
 	if sm.httpLn != nil {
 		_ = sm.httpLn.Close()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -54,6 +55,13 @@ func ensureRequestUploadSpace(dir string, contentLength int64) error {
 // Free space is re-checked while writing so that chunked uploads (unknown
 // Content-Length) cannot fill the storage.
 func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
+	return writeStreamTempProgress(dir, src, nil)
+}
+
+func writeStreamTempProgress(dir string, src io.Reader, stage func(string)) (string, int64, error) {
+	if stage != nil {
+		stage("receiving")
+	}
 	tmp, err := os.CreateTemp(dir, ".wififiles-upload-*.part")
 	if err != nil {
 		return "", 0, err
@@ -95,6 +103,9 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	if err := ensureFreeSpaceDuringWrite(dir); err != nil {
 		return "", written, err
 	}
+	if stage != nil {
+		stage("sync")
+	}
 	if err := tmp.Sync(); err != nil {
 		return "", written, err
 	}
@@ -103,6 +114,48 @@ func writeStreamTemp(dir string, src io.Reader) (string, int64, error) {
 	}
 	ok = true
 	return tmpPath, written, nil
+}
+
+// sameUploadContent compares only a name/size collision. Keep memory bounded
+// and stop at the first difference instead of hashing every book on the reader.
+func sameUploadContent(existing, incoming string, size int64) (bool, error) {
+	st, err := os.Stat(existing)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !st.Mode().IsRegular() || st.Size() != size {
+		return false, nil
+	}
+	a, err := os.Open(existing)
+	if err != nil {
+		return false, err
+	}
+	defer a.Close()
+	b, err := os.Open(incoming)
+	if err != nil {
+		return false, err
+	}
+	defer b.Close()
+	ab, bb := make([]byte, 32<<10), make([]byte, 32<<10)
+	for {
+		an, ae := io.ReadFull(a, ab)
+		bn, be := io.ReadFull(b, bb)
+		if ae != nil && ae != io.EOF && ae != io.ErrUnexpectedEOF {
+			return false, ae
+		}
+		if be != nil && be != io.EOF && be != io.ErrUnexpectedEOF {
+			return false, be
+		}
+		if an != bn || !bytes.Equal(ab[:an], bb[:bn]) {
+			return false, nil
+		}
+		if ae != nil || be != nil {
+			return ae == be, nil
+		}
+	}
 }
 
 // ensureFreeSpaceDuringWrite aborts the upload when less than the safety

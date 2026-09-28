@@ -500,10 +500,7 @@ func installAppFile(newApp, target string) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Chmod(tmp, 0755); err != nil {
-		os.Remove(tmp)
-		return err
-	}
+	chmodBestEffort(tmp, 0755)
 	if err := verifyAppFile(tmp); err != nil {
 		os.Remove(tmp)
 		return err
@@ -512,7 +509,8 @@ func installAppFile(newApp, target string) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Chmod(target, 0755)
+	chmodBestEffort(target, 0755)
+	return nil
 }
 
 func writeUpdateStatus(appDir, status, current, latest, message string) {

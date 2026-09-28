@@ -20,7 +20,8 @@ ALLOWED_SERVERS = ("https://git.xloud.ru", "http://gitea:3000")
 
 
 def release_api():
-    server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
+    server = (os.environ.get("RELEASE_SERVER_URL") or
+              os.environ.get("GITHUB_SERVER_URL", "")).rstrip("/")
     if server not in ALLOWED_SERVERS:
         raise ValueError("Unexpected Gitea server URL")
     return server + "/api/v1/repos/gpakoh/WiFiFiles"
@@ -129,13 +130,29 @@ def publish(version, artifacts, notes):
         print(f"Asset: {asset['name']} ({asset['size']} bytes) {asset['browser_download_url']}", flush=True)
 
 
+def ci_publication_requested():
+    context = {name: os.environ.get(name, "") for name in
+               ("GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SERVER_URL")}
+    print("CI release context: " + json.dumps(context), flush=True)
+    if not context["GITHUB_EVENT_NAME"] or not context["GITHUB_REF"]:
+        raise ValueError("CI event and ref are required for publication")
+    if (context["GITHUB_EVENT_NAME"] != "push" or
+            context["GITHUB_REF"] not in ("refs/heads/main", "main") or
+            context["GITHUB_SERVER_URL"].rstrip("/") == "https://github.com"):
+        print("Package build verified; publication is only enabled for Gitea main pushes.", flush=True)
+        return False
+    return True
+
+
 def main():
     os.chdir(ROOT)
+    if sys.argv[1:] not in ([], ["--validate-only"], ["--ci"]):
+        raise ValueError("Usage: publish_release.py [--validate-only|--ci]")
+    if sys.argv[1:] == ["--ci"] and not ci_publication_requested():
+        return
     version, artifacts, notes = validate_package()
     if sys.argv[1:] == ["--validate-only"]:
         return
-    if sys.argv[1:]:
-        raise ValueError("Usage: publish_release.py [--validate-only]")
     publish(version, artifacts, notes)
 
 

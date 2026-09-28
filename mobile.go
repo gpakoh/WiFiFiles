@@ -441,6 +441,8 @@ func readMultipartText(part io.Reader, max int64) (string, error) {
 }
 
 func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, token, targetDir, virtual string) {
+	w, transfer := beginHTTPUpload(w, r, "QR raw")
+	defer transfer.finish()
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
 	if err := ensureRequestUploadSpace(targetDir, r.ContentLength); err != nil {
 		mobileJSON(w, 507, map[string]string{"error": err.Error()})
@@ -470,8 +472,9 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 		return
 	}
 
-	tmpPath, size, err := writeStreamTemp(targetDir, r.Body)
+	tmpPath, size, err := writeStreamTempProgress(targetDir, r.Body, transfer.stage)
 	if err != nil {
+		transfer.failure = err
 		mobileJSON(w, http.StatusInternalServerError, map[string]string{"error": "Не удалось сохранить файл: " + err.Error()})
 		return
 	}
@@ -482,8 +485,9 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 	}
 
 	originalPath := filepath.Join(targetDir, name)
-	if st, statErr := os.Stat(originalPath); statErr == nil && st.Mode().IsRegular() && st.Size() == size {
-		result := MobileUploadResult{Status: "skipped", Original: name, StoredAs: name, Message: "Файл с таким именем и размером уже есть — пропущен"}
+	transfer.stage("compare")
+	if same, statErr := sameUploadContent(originalPath, tmpPath, size); statErr == nil && same {
+		result := MobileUploadResult{Status: "skipped", Original: name, StoredAs: name, Message: "Такой файл уже есть — содержимое совпадает"}
 		a.saveMobileReceipt(token, uploadID, result)
 		mobileJSON(w, http.StatusOK, result)
 		return
@@ -492,6 +496,12 @@ func (a *App) handleMobileRawUpload(w http.ResponseWriter, r *http.Request, toke
 		return
 	}
 
+	transfer.stage("commit")
+	if err := r.Context().Err(); err != nil {
+		transfer.failure = err
+		mobileJSON(w, http.StatusRequestTimeout, map[string]string{"error": err.Error()})
+		return
+	}
 	stored, err := commitTempAutoRename(targetDir, name, tmpPath)
 	if err != nil {
 		mobileJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -520,6 +530,8 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 		a.handleMobileRawUpload(w, r, token, targetDir, virtual)
 		return
 	}
+	w, transfer := beginHTTPUpload(w, r, "QR multipart")
+	defer transfer.finish()
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
 	if err := ensureRequestUploadSpace(targetDir, r.ContentLength); err != nil {
 		mobileJSON(w, 507, map[string]string{"error": err.Error()})
@@ -601,9 +613,10 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 				mobileJSON(w, http.StatusBadRequest, map[string]string{"error": "Поддерживаются только файлы книг"})
 				return
 			}
-			tmpPath, size, err = writeStreamTemp(targetDir, part)
+			tmpPath, size, err = writeStreamTempProgress(targetDir, part, transfer.stage)
 			_ = part.Close()
 			if err != nil {
+				transfer.failure = err
 				mobileJSON(w, http.StatusInternalServerError, map[string]string{"error": "Не удалось сохранить файл: " + err.Error()})
 				return
 			}
@@ -626,8 +639,9 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 	}
 
 	originalPath := filepath.Join(targetDir, name)
-	if st, statErr := os.Stat(originalPath); statErr == nil && st.Mode().IsRegular() && st.Size() == size {
-		result := MobileUploadResult{Status: "skipped", Original: name, StoredAs: name, Message: "Файл с таким именем и размером уже есть — пропущен"}
+	transfer.stage("compare")
+	if same, statErr := sameUploadContent(originalPath, tmpPath, size); statErr == nil && same {
+		result := MobileUploadResult{Status: "skipped", Original: name, StoredAs: name, Message: "Такой файл уже есть — содержимое совпадает"}
 		a.saveMobileReceipt(token, uploadID, result)
 		mobileJSON(w, http.StatusOK, result)
 		return
@@ -636,6 +650,12 @@ func (a *App) handleMobileUploadOne(w http.ResponseWriter, r *http.Request, toke
 		return
 	}
 
+	transfer.stage("commit")
+	if err := r.Context().Err(); err != nil {
+		transfer.failure = err
+		mobileJSON(w, http.StatusRequestTimeout, map[string]string{"error": err.Error()})
+		return
+	}
 	stored, err := commitTempAutoRename(targetDir, name, tmpPath)
 	if err != nil {
 		mobileJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -815,6 +835,9 @@ func (a *App) renderMobileV2(w http.ResponseWriter, token, targetDir, target, mo
 	overallProgress := mobileText(lang, "Общий прогресс", "Overall progress", "Progression totale", "Gesamtfortschritt")
 	preparing := mobileText(lang, "Подготовка…", "Preparing…", "Préparation…", "Vorbereitung…")
 	networkError := mobileText(lang, "Передача не удалась. Проверьте Wi‑Fi.", "Transfer failed. Check Wi-Fi.", "Échec du transfert. Vérifiez le Wi-Fi.", "Übertragung fehlgeschlagen. Prüfen Sie das WLAN.")
+	cancelTransfer := mobileText(lang, "Отменить передачу", "Cancel transfer", "Annuler le transfert", "Übertragung abbrechen")
+	cancelled := mobileText(lang, "Передача отменена", "Transfer cancelled", "Transfert annulé", "Übertragung abgebrochen")
+	timeoutError := mobileText(lang, "Нет ответа от читалки. Проверьте Wi-Fi и повторите передачу.", "No response from the reader. Check Wi-Fi and retry.", "Le lecteur ne répond pas. Vérifiez le Wi-Fi et réessayez.", "Keine Antwort vom Reader. Prüfen Sie das WLAN und versuchen Sie es erneut.")
 	retryFailed := mobileText(lang, "Повторить неудавшиеся", "Retry failed files", "Réessayer les fichiers en échec", "Fehlgeschlagene erneut versuchen")
 	completed := mobileText(lang, "Очередь завершена", "Queue complete", "File d’attente terminée", "Warteschlange abgeschlossen")
 	transferred := mobileText(lang, "Передано", "Transferred", "Transférés", "Übertragen")
@@ -845,7 +868,7 @@ func (a *App) renderMobileV2(w http.ResponseWriter, token, targetDir, target, mo
 		fmt.Fprintf(w, "<div class=\"err\">%s</div>", template.HTMLEscapeString(pageErr))
 	}
 	fmt.Fprintf(w, "<div class=\"card\"><span class=\"%s\">%s</span><p class=\"muted\">%s</p><div class=\"muted\">%s</div><div class=\"path\">%s%s</div><p><strong>%s:</strong> <span id=\"free-space\">%s</span></p></div>", template.HTMLEscapeString(badgeClass), template.HTMLEscapeString(modeTitle), template.HTMLEscapeString(modeNote), template.HTMLEscapeString(destination), template.HTMLEscapeString(mobileTargetLabel(lang, target)), destBadge, template.HTMLEscapeString(freeLabel), template.HTMLEscapeString(free))
-	fmt.Fprintf(w, "<form id=\"queue-form\" class=\"card\"><h2>%s</h2><input id=\"book-files\" type=\"file\" multiple required><button id=\"start-button\" class=\"primary\" type=\"submit\">%s</button><div id=\"progress-box\" class=\"progressbox\"><div class=\"progress-label\"><span>%s</span><span id=\"current-label\"></span></div><progress id=\"current-progress\" max=\"100\" value=\"0\"></progress><div class=\"progress-label\"><span>%s</span><span id=\"overall-label\"></span></div><progress id=\"overall-progress\" max=\"100\" value=\"0\"></progress></div><div id=\"results\"></div><div id=\"rejected-box\" class=\"muted\" style=\"font-size:14px\"></div><div id=\"summary-box\"></div><button id=\"retry-button\" class=\"primary\" type=\"button\" style=\"display:none\">%s</button></form>", template.HTMLEscapeString(choose), template.HTMLEscapeString(send), template.HTMLEscapeString(currentProgress), template.HTMLEscapeString(overallProgress), template.HTMLEscapeString(retryFailed))
+	fmt.Fprintf(w, "<form id=\"queue-form\" class=\"card\"><h2>%s</h2><input id=\"book-files\" type=\"file\" multiple required><button id=\"start-button\" class=\"primary\" type=\"submit\">%s</button><button id=\"cancel-button\" class=\"danger\" type=\"button\" style=\"display:none\" data-cancelled=\"%s\" data-timeout=\"%s\">%s</button><div id=\"progress-box\" class=\"progressbox\"><div class=\"progress-label\"><span>%s</span><span id=\"current-label\"></span></div><progress id=\"current-progress\" max=\"100\" value=\"0\"></progress><div class=\"progress-label\"><span>%s</span><span id=\"overall-label\"></span></div><progress id=\"overall-progress\" max=\"100\" value=\"0\"></progress></div><div id=\"results\"></div><div id=\"rejected-box\" class=\"muted\" style=\"font-size:14px\"></div><div id=\"summary-box\"></div><button id=\"retry-button\" class=\"primary\" type=\"button\" style=\"display:none\">%s</button></form>", template.HTMLEscapeString(choose), template.HTMLEscapeString(send), template.HTMLEscapeString(cancelled), template.HTMLEscapeString(timeoutError), template.HTMLEscapeString(cancelTransfer), template.HTMLEscapeString(currentProgress), template.HTMLEscapeString(overallProgress), template.HTMLEscapeString(retryFailed))
 	fmt.Fprintf(w, "<div class=\"card\"><div style=\"display:flex;justify-content:space-between;gap:10px;align-items:center\"><h2>%s</h2><a class=\"button\" href=\"/m/%s\">%s</a></div>", template.HTMLEscapeString(folderContents), template.HTMLEscapeString(token), template.HTMLEscapeString(reload))
 	fmt.Fprint(w, "<div id=\"folder-list\">")
 	if len(entries) == 0 {
@@ -861,14 +884,60 @@ func (a *App) renderMobileV2(w http.ResponseWriter, token, targetDir, target, mo
 
 	js := fmt.Sprintf(`(function(){
 var form=document.getElementById('queue-form'),input=document.getElementById('book-files'),start=document.getElementById('start-button'),retry=document.getElementById('retry-button'),box=document.getElementById('progress-box'),cp=document.getElementById('current-progress'),op=document.getElementById('overall-progress'),cl=document.getElementById('current-label'),ol=document.getElementById('overall-label'),results=document.getElementById('results'),summaryBox=document.getElementById('summary-box'),rejectedBox=document.getElementById('rejected-box'),folderList=document.getElementById('folder-list'),freeSpace=document.getElementById('free-space');
+var cancelButton=document.getElementById('cancel-button'),running=false,cancelRequested=false,activeXHR=null;
 var failed=[],stats={uploaded:0,skipped:0,failed:0};
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function setState(item,state,name,msg){if(item.state&&stats[item.state]>0)stats[item.state]--;item.state=state;stats[state]++;var id='result-'+item.domId,el=document.getElementById(id),html='<strong>'+esc(name)+'</strong><br>'+esc(msg);if(!el){results.insertAdjacentHTML('beforeend','<div id="'+id+'" class="result-row status-'+state+'">'+html+'</div>');}else{el.className='result-row status-'+state;el.innerHTML=html;}}
-function refreshList(){var x=new XMLHttpRequest();x.open('GET','/m/%s/fragment',true);x.onload=function(){if(x.status>=200&&x.status<300){folderList.innerHTML=x.responseText;var f=x.getResponseHeader('X-WiFiFiles-Free-Space');if(f&&freeSpace)freeSpace.textContent=f;}};x.send();} function finishServer(cb){var x=new XMLHttpRequest();x.open('POST','/m/%s/finish',true);x.onload=function(){refreshList();cb&&cb();};x.onerror=function(){cb&&cb();};x.send('');}
-function summary(){summaryBox.innerHTML='<div class="card summary"><strong>%s</strong><br>%s: '+stats.uploaded+'<br>%s: '+stats.skipped+'<br>%s: '+stats.failed+'</div>';retry.style.display=failed.length?'block':'none';start.disabled=false;}
-function upload(item,index,total,done){var x=new XMLHttpRequest(),u='/m/%s/upload?upload_id='+encodeURIComponent(item.id)+'&name='+encodeURIComponent(item.file.name);x.open('POST',u,true);x.setRequestHeader('Content-Type','application/octet-stream');cl.textContent=item.file.name;cp.value=0;x.upload.onprogress=function(e){if(!e.lengthComputable)return;var p=Math.round(e.loaded*100/e.total);cp.value=p;op.value=Math.round(((index+p/100)/total)*100);ol.textContent=(index+1)+' / '+total;};x.onerror=function(){failed.push(item);setState(item,'failed',item.file.name,%s);done();};x.onload=function(){if(x.status>=200&&x.status<300){try{var r=JSON.parse(x.responseText);if(r.status==='skipped'){setState(item,'skipped',r.stored_as,r.message);}else{setState(item,'uploaded',r.stored_as,r.message);}done();}catch(e){failed.push(item);setState(item,'failed',item.file.name,%s);done();}}else{var m=%s;try{m=JSON.parse(x.responseText).error||m;}catch(e){}failed.push(item);setState(item,'failed',item.file.name,m);done();}};x.send(item.file);}
-function run(items,reset){if(!items.length)return;if(reset){failed=[];stats={uploaded:0,skipped:0,failed:0};results.innerHTML='';}else{failed=[];}summaryBox.innerHTML='';retry.style.display='none';start.disabled=true;box.className='progressbox visible';cp.value=0;op.value=0;cl.textContent=%s;var i=0;function next(){if(i>=items.length){op.value=100;finishServer(summary);return;}var item=items[i],idx=i;i++;upload(item,idx,items.length,next);}next();}
-form.addEventListener('submit',function(e){e.preventDefault();var fs=Array.prototype.slice.call(input.files||[]),batch=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),items=[],rejected=[];var bookExt=['.epub','.fb2','.fb2.zip','.pdf','.djvu','.djv','.mobi','.prc','.azw','.azw3','.txt','.rtf','.doc','.docx','.chm','.html','.htm','.cbz','.cbr','.tcr','.pdb'];function isBook(name){name=name.toLowerCase();for(var i=0;i<bookExt.length;i++){if(name.indexOf(bookExt[i],name.length-bookExt[i].length)!==-1)return true;}return false;}fs.forEach(function(f,i){if(isBook(f.name)){items.push({file:f,id:batch+'-'+i+'-'+f.size+'-'+f.lastModified,domId:'q'+i,state:''});}else{rejected.push({file:f,domId:'q'+i});}});if(rejected.length){rejectedBox.innerHTML='';rejected.forEach(function(it){rejectedBox.insertAdjacentHTML('beforeend','<div class="result-row status-failed"><strong>'+esc(it.file.name)+'</strong><br>'+esc(%s)+'</div>');});}run(items,true);});
+function refreshList(){var x=new XMLHttpRequest();x.open('GET','/m/%s/fragment',true);x.timeout=15000;x.onload=function(){if(x.status>=200&&x.status<300){folderList.innerHTML=x.responseText;var f=x.getResponseHeader('X-WiFiFiles-Free-Space');if(f&&freeSpace)freeSpace.textContent=f;}};x.send();}
+function finishServer(cb){
+  var x=new XMLHttpRequest(),finished=false;
+  function finish(){if(finished)return;finished=true;if(cb)cb();try{refreshList();}catch(e){}}
+  x.open('POST','/m/%s/finish',true);x.timeout=30000;
+  x.onload=finish;x.onerror=finish;x.onabort=finish;x.ontimeout=finish;
+  try{x.send('');}catch(e){finish();}
+}
+function summary(){summaryBox.innerHTML='<div class="card summary"><strong>%s</strong><br>%s: '+stats.uploaded+'<br>%s: '+stats.skipped+'<br>%s: '+stats.failed+'</div>';retry.style.display=failed.length?'block':'none';start.disabled=false;input.disabled=false;cancelButton.style.display='none';running=false;}
+function upload(item,index,total,done){
+  var x=new XMLHttpRequest(),u='/m/%s/upload?upload_id='+encodeURIComponent(item.id)+'&name='+encodeURIComponent(item.file.name),settled=false,timer;
+  function finish(message){
+    if(settled)return;settled=true;clearTimeout(timer);if(activeXHR===x)activeXHR=null;
+    if(message){failed.push(item);setState(item,'failed',item.file.name,message);}
+    done();
+  }
+  function arm(){clearTimeout(timer);timer=setTimeout(function(){finish(cancelButton.dataset.timeout);x.abort();},180000);}
+  activeXHR=x;x.open('POST',u,true);x.setRequestHeader('Content-Type','application/octet-stream');cl.textContent=item.file.name;cp.value=0;
+  x.upload.onprogress=function(e){if(settled)return;arm();if(!e.lengthComputable)return;var p=Math.round(e.loaded*100/e.total);cp.value=p;op.value=Math.round(((index+p/100)/total)*100);ol.textContent=(index+1)+' / '+total;};
+  x.upload.onload=function(){if(!settled)arm();};
+  x.onerror=function(){finish(%s);};
+  x.onabort=function(){finish(cancelButton.dataset.cancelled);};
+  x.ontimeout=function(){finish(cancelButton.dataset.timeout);};
+  x.onload=function(){
+    if(settled)return;
+    if(x.status>=200&&x.status<300){
+      var r;try{r=JSON.parse(x.responseText);if(!r||(r.status!=='uploaded'&&r.status!=='renamed'&&r.status!=='skipped'))throw new Error('Invalid upload response');}catch(e){finish(%s);return;}
+      if(r.status==='skipped'){setState(item,'skipped',r.stored_as,r.message);}else{setState(item,'uploaded',r.stored_as,r.message);}
+      finish();
+    }else{var m=%s;try{m=JSON.parse(x.responseText).error||m;}catch(e){}finish(m);}
+  };
+  arm();try{x.send(item.file);}catch(e){finish(e.message);}
+}
+function run(items,reset){
+  if(running||!items.length)return;running=true;cancelRequested=false;
+  if(reset){failed=[];stats={uploaded:0,skipped:0,failed:0};results.innerHTML='';}else{failed=[];}
+  summaryBox.innerHTML='';retry.style.display='none';start.disabled=true;input.disabled=true;cancelButton.style.display='block';cancelButton.disabled=false;
+  box.className='progressbox visible';cp.value=0;op.value=0;cl.textContent=%s;var i=0;
+  function next(){
+    if(cancelRequested){
+      while(i<items.length){var pending=items[i++];failed.push(pending);setState(pending,'failed',pending.file.name,cancelButton.dataset.cancelled);}
+      cancelButton.disabled=true;finishServer(summary);return;
+    }
+    if(i>=items.length){op.value=100;cancelButton.disabled=true;finishServer(summary);return;}
+    var item=items[i],idx=i;i++;upload(item,idx,items.length,next);
+  }
+  next();
+}
+cancelButton.addEventListener('click',function(){cancelRequested=true;if(activeXHR)activeXHR.abort();});
+form.addEventListener('submit',function(e){e.preventDefault();if(running)return;var fs=Array.prototype.slice.call(input.files||[]),batch=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2),items=[],rejected=[];var bookExt=['.epub','.fb2','.fb2.zip','.pdf','.djvu','.djv','.mobi','.prc','.azw','.azw3','.txt','.rtf','.doc','.docx','.chm','.html','.htm','.cbz','.cbr','.tcr','.pdb'];function isBook(name){name=name.toLowerCase();for(var i=0;i<bookExt.length;i++){if(name.indexOf(bookExt[i],name.length-bookExt[i].length)!==-1)return true;}return false;}fs.forEach(function(f,i){if(isBook(f.name)){items.push({file:f,id:batch+'-'+i+'-'+f.size+'-'+f.lastModified,domId:'q'+i,state:''});}else{rejected.push({file:f,domId:'q'+i});}});if(rejected.length){rejectedBox.innerHTML='';rejected.forEach(function(it){rejectedBox.insertAdjacentHTML('beforeend','<div class="result-row status-failed"><strong>'+esc(it.file.name)+'</strong><br>'+esc(%s)+'</div>');});}run(items,true);});
 retry.addEventListener('click',function(){var again=failed.slice();run(again,false);});
 })();`, template.JSEscapeString(token), template.JSEscapeString(token), template.JSEscapeString(completed), template.JSEscapeString(transferred), template.JSEscapeString(skipped), template.JSEscapeString(failedText), template.JSEscapeString(token), strconv.Quote(networkError), strconv.Quote(networkError), strconv.Quote(networkError), strconv.Quote(preparing), strconv.Quote(onlyBooks))
 	fmt.Fprintf(w, "<script>%s</script></div></body></html>", js)

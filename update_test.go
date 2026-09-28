@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -418,6 +419,23 @@ func TestInstallAppFile(t *testing.T) {
 	}
 	if err := installAppFile(newApp, filepath.Join(dir, "no", "such", "dir.app")); err == nil {
 		t.Error("missing target dir should fail")
+	}
+}
+
+func TestInstallAppFileToleratesChmodFailure(t *testing.T) {
+	orig := chmodFile
+	chmodFile = func(string, os.FileMode) error { return syscall.EPERM }
+	defer func() { chmodFile = orig }()
+
+	dir := t.TempDir()
+	newApp := filepath.Join(dir, "new.app")
+	target := filepath.Join(dir, "WiFiFiles.app")
+	writeFakeApp(t, newApp)
+	if err := installAppFile(newApp, target); err != nil {
+		t.Fatalf("chmod failure must not abort install: %v", err)
+	}
+	if err := verifyAppFile(target); err != nil {
+		t.Fatalf("installed app must pass verification: %v", err)
 	}
 }
 

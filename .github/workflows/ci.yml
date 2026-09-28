@@ -56,7 +56,7 @@ jobs:
 
   release:
     needs: [test, fuzz]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.server_url == 'https://git.xloud.ru'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.server_url == 'https://git.xloud.ru' || github.server_url == 'http://gitea:3000')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -82,5 +82,5 @@ jobs:
 
       - name: Publish Gitea release
         env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}
         run: python3 publish_release.py

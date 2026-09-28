@@ -16,7 +16,14 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parent
-API = "https://git.xloud.ru/api/v1/repos/gpakoh/WiFiFiles"
+ALLOWED_SERVERS = ("https://git.xloud.ru", "http://gitea:3000")
+
+
+def release_api():
+    server = os.environ.get("GITHUB_SERVER_URL", "").rstrip("/")
+    if server not in ALLOWED_SERVERS:
+        raise ValueError("Unexpected Gitea server URL")
+    return server + "/api/v1/repos/gpakoh/WiFiFiles"
 
 
 def validate_package():
@@ -56,6 +63,7 @@ def validate_package():
 
 
 def publish(version, artifacts, notes):
+    api = release_api()
     token = os.environ.get("GITEA_TOKEN", "")
     if not token:
         raise ValueError("GITEA_TOKEN is required")
@@ -68,7 +76,7 @@ def publish(version, artifacts, notes):
     def request(path, method="GET", data=None, content_type="application/json"):
         if isinstance(data, dict):
             data = json.dumps(data).encode()
-        req = Request(API + path, data=data, method=method, headers={
+        req = Request(api + path, data=data, method=method, headers={
             "Authorization": "token " + token,
             "Content-Type": content_type,
             "Accept": "application/json",
